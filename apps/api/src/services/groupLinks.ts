@@ -11,7 +11,16 @@ export interface FlatLinkRow {
 }
 
 export interface GroupLinksInput {
-  /** All link rows for the requested axes (unfiltered by cursor/limit). */
+  /**
+   * Link rows for the requested axes. For a pairwise relation this is
+   * every row (the links table has no cap). For a hub-derived (family)
+   * relation this may be only a page's worth already filtered to "after
+   * the cursor" and limited to `limit` rows by the caller (a hub can
+   * have 500+ members, so the caller pushes that predicate into SQL
+   * rather than fetching them all here) - see apps/api/src/db/queries.ts.
+   * Because family rows may be a strict subset of the full set, `total`
+   * cannot always be derived from `rows.length` alone; see `totals`.
+   */
   rows: FlatLinkRow[];
   /** toEntryId -> entry summary. Rows with no matching summary are dropped. */
   summaries: Map<string, EntrySummary>;
@@ -27,6 +36,18 @@ export interface GroupLinksInput {
    * own so it can never skip or repeat links even if called that way.
    */
   cursor?: string | undefined;
+  /**
+   * Authoritative per-axis total (distinct partner count, summed over
+   * relations), typically the same query used for GET /entries/:id's
+   * linkCounts so the two endpoints agree exactly. When an axis is
+   * present here its value is used as `total` (and to decide
+   * `hasMore`) instead of `rows.length`, since `rows` may be a partial
+   * page for a hub-backed relation. When an axis is absent, `total`
+   * falls back to counting the (assumed-complete) rows, which is the
+   * only option available to callers - such as tests - that pass a
+   * fully-materialized `rows` array directly.
+   */
+  totals?: Partial<Record<Axis, number>>;
 }
 
 /**
@@ -60,7 +81,7 @@ function compareLinkOrder(
  * continued via the opaque cursor returned as `nextCursor`.
  */
 export function groupLinks(input: GroupLinksInput): AxisGroup[] {
-  const { rows, summaries, axes, limit, cursor } = input;
+  const { rows, summaries, axes, limit, cursor, totals } = input;
   const decodedCursor = cursor ? decodeCursor(cursor) : null;
 
   return axes.map((axis): AxisGroup => {
@@ -68,7 +89,7 @@ export function groupLinks(input: GroupLinksInput): AxisGroup[] {
       .filter((r) => r.axis === axis && summaries.has(r.toEntryId))
       .sort(compareLinkOrder);
 
-    const total = sorted.length;
+    const total = totals?.[axis] ?? sorted.length;
 
     // The cursor only applies to the axis it was issued for; every
     // other axis (and a cursor for an axis not even in this request)

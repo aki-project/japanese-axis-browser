@@ -1,26 +1,31 @@
 import {
   entryResponseSchema,
+  isFamilyRelation,
   linksQuerySchema,
   linksResponseSchema,
   normalizeSearchKey,
   parseEntryId,
+  RELATIONS_BY_AXIS,
   searchQuerySchema,
   searchResponseSchema,
+  type Axis,
   type EntryId,
   type EntryKind,
+  type Relation,
 } from '@japanesesite/shared';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import {
   findEntryRow,
   getEntrySummaries,
+  getHubSiblingRows,
   getLinkCounts,
   getLinkRowsForAxes,
   getSentencesForEntry,
   searchEntries,
 } from '../db/queries.js';
 import { decodeCursor } from '../services/cursor.js';
-import { groupLinks } from '../services/groupLinks.js';
+import { groupLinks, type FlatLinkRow } from '../services/groupLinks.js';
 
 const CACHE_CONTROL = 'public, max-age=86400';
 
@@ -118,7 +123,8 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
     // A cursor is an opaque token round-tripped from a previous
     // response: if it doesn't decode, it's a client error, not "start
     // over from page 1".
-    if (cursor !== undefined && decodeCursor(cursor) === null) {
+    const decodedCursor = cursor !== undefined ? decodeCursor(cursor) : null;
+    if (cursor !== undefined && decodedCursor === null) {
       return reply.code(400).send({
         error: { code: 'INVALID_CURSOR', message: 'cursor is not a valid links cursor' },
       });
@@ -129,12 +135,46 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
       return reply.code(404).send(entryNotFoundError(entryId));
     }
 
-    const rows = await getLinkRowsForAxes(db, entryId, axis);
-    const summaries = await getEntrySummaries(
-      db,
-      rows.map((r) => r.toEntryId),
+    // Pairwise rows (links table) are fetched in full per requested
+    // axis - the pairwise relations are naturally low fan-out, unlike a
+    // hub, so there is no cap to page around. Family (hub-derived)
+    // relations are the opposite: a hub can have 500+ members, so each
+    // one is fetched as its own cursor-scoped, LIMIT-bound page (see
+    // getHubSiblingRows) rather than materialized in full here.
+    const familyRowsByAxis = await Promise.all(
+      axis.map((a) => {
+        const familyRelations = (RELATIONS_BY_AXIS[a] as readonly Relation[]).filter(
+          isFamilyRelation,
+        );
+        // A cursor only continues the axis it was issued for; every
+        // other axis (including every family relation on it) starts
+        // fresh from its first page, same as groupLinks' own handling.
+        const cursorForAxis = decodedCursor && decodedCursor.axis === a ? decodedCursor : null;
+        return Promise.all(
+          familyRelations.map((relation) =>
+            getHubSiblingRows(db, entryId, relation, cursorForAxis, limit),
+          ),
+        );
+      }),
     );
-    const axes = groupLinks({ rows, summaries, axes: axis, limit, cursor });
+
+    const pairwiseRows = await getLinkRowsForAxes(db, entryId, axis);
+    const rows: FlatLinkRow[] = [...pairwiseRows, ...familyRowsByAxis.flat(2)];
+
+    const [summaries, linkCounts] = await Promise.all([
+      getEntrySummaries(
+        db,
+        rows.map((r) => r.toEntryId),
+      ),
+      getLinkCounts(db, entryId),
+    ]);
+
+    const totals: Partial<Record<Axis, number>> = {
+      semantic: linkCounts.semantic,
+      phonetic: linkCounts.phonetic,
+      structural: linkCounts.structural,
+    };
+    const axes = groupLinks({ rows, summaries, axes: axis, limit, cursor, totals });
 
     const body = linksResponseSchema.parse({ entryId, axes });
     reply.header('Cache-Control', CACHE_CONTROL);

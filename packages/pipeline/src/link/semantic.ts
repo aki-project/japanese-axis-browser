@@ -1,16 +1,22 @@
 /**
- * Semantic axis: JMdict cross-references (see_also), JMdict antonym
- * markers (antonym), Japanese WordNet synsets (synonym), and words that
- * share an exact English gloss string (shared_sense). See CLAUDE.md for
- * the axis contract.
+ * Semantic axis: JMdict cross-references (see_also) and JMdict antonym
+ * markers (antonym) are pairwise links. Japanese WordNet synsets
+ * (synonym) and words that share an exact English gloss string
+ * (shared_sense) are family relations - a synset or a gloss is
+ * "everything that shares an X", so they are built as hubs, never
+ * pairwise edges (CLAUDE.md, "Two storage shapes"). See
+ * buildSemanticHubs.
  */
 import { wordEntryId } from '@japanesesite/shared';
 import type { EntryId, Link, VocabularyItem } from '@japanesesite/shared';
 import type { JMdictEntry } from '../parsers/jmdict.js';
 import type { WordnetEntry } from '../parsers/wordnet.js';
-import { addSymmetric, capPerEntry, pushAll } from './common.js';
+import { addSymmetric, wordHubRank } from './common.js';
+import { buildHubs, capHubSize, mergeHubResults, type HubBuildResult, type HubGroupInput } from './hubs.js';
 
-const SHARED_SENSE_CAP = 20;
+/** Gloss hubs are capped by SIZE (not per-entry): a gloss like "to do" is not a useful family. */
+export const GLOSS_HUB_SIZE_CAP = 200;
+
 const XREF_SEPARATOR = '・'; // ・ KATAKANA MIDDLE DOT, used by JMdict xref/ant text
 
 interface WordLookup {
@@ -78,15 +84,14 @@ function resolveXref(text: string, lookup: WordLookup): VocabularyItem | null {
 export interface SemanticLinkInputs {
   words: VocabularyItem[];
   jmdictEntries: JMdictEntry[];
-  wordnet: WordnetEntry[];
 }
 
+/** see_also/antonym: pairwise links from JMdict cross-reference and antonym markers. */
 export function buildSemanticLinks(inputs: SemanticLinkInputs): Link[] {
   const included = new Set(inputs.words.map((w) => w.entSeq));
   const lookup = buildLookup(inputs.words);
   const out: Link[] = [];
 
-  // --- JMdict cross-references and antonyms ---
   for (const entry of inputs.jmdictEntries) {
     if (!included.has(entry.entSeq)) continue;
     const fromWord = lookup.byEntSeq.get(entry.entSeq);
@@ -123,6 +128,21 @@ export function buildSemanticLinks(inputs: SemanticLinkInputs): Link[] {
     }
   }
 
+  return out;
+}
+
+export interface SemanticHubInputs {
+  words: VocabularyItem[];
+  wordnet: WordnetEntry[];
+}
+
+/** synonym (synset hubs) and shared_sense (gloss hubs): family relations. */
+export function buildSemanticHubs(inputs: SemanticHubInputs): {
+  hubs: HubBuildResult;
+  glossHubsDropped: number;
+} {
+  const lookup = buildLookup(inputs.words);
+
   // --- Japanese WordNet: words sharing a synset ---
   const synsetLemmas = new Map<string, string[]>();
   for (const row of inputs.wordnet) {
@@ -130,64 +150,41 @@ export function buildSemanticLinks(inputs: SemanticLinkInputs): Link[] {
     arr.push(row.lemma);
     synsetLemmas.set(row.synset, arr);
   }
-  for (const lemmas of synsetLemmas.values()) {
-    const resolved: { word: VocabularyItem; primary: boolean }[] = [];
+  const synsetGroups = new Map<string, HubGroupInput>();
+  for (const [synset, lemmas] of synsetLemmas) {
+    const primaryLemmas: string[] = [];
+    const members: HubGroupInput['members'] = [];
+    const seenEntSeq = new Set<number>();
     for (const lemma of lemmas) {
       const candidates = [...(lookup.bySurface.get(lemma) ?? []), ...(lookup.byReading.get(lemma) ?? [])];
       const word = pickBest(candidates);
       if (!word) continue;
       const primary = word.surface === lemma || word.reading === lemma;
-      resolved.push({ word, primary });
-    }
-    for (let i = 0; i < resolved.length; i += 1) {
-      for (let j = i + 1; j < resolved.length; j += 1) {
-        const a = resolved[i];
-        const b = resolved[j];
-        if (!a || !b || a.word.entSeq === b.word.entSeq) continue;
-        const weight = a.primary && b.primary ? 1.0 : 0.7;
-        addSymmetric(
-          out,
-          wordEntryId(a.word.entSeq),
-          wordEntryId(b.word.entSeq),
-          'semantic',
-          'synonym',
-          weight,
-          'wordnet',
-        );
+      if (primary) primaryLemmas.push(lemma);
+      if (!seenEntSeq.has(word.entSeq)) {
+        seenEntSeq.add(word.entSeq);
+        members.push({ entryId: wordEntryId(word.entSeq), rank: wordHubRank(word) });
       }
     }
+    // Representative lemma for the label: the lexicographically first
+    // primary-matching lemma, deterministically; the synset ID itself
+    // when no lemma resolved to a primary surface/reading match.
+    const label = [...primaryLemmas].sort()[0] ?? synset;
+    synsetGroups.set(synset, { key: synset, label, members });
   }
+  const synsetHubs = buildHubs('synset', synsetGroups.values());
 
-  // --- Shared exact English gloss string ---
-  const glossGroups = new Map<string, number[]>();
+  // --- shared exact English gloss string ---
+  const glossGroups = new Map<string, HubGroupInput>();
   for (const w of inputs.words) {
     for (const m of new Set(w.meanings)) {
-      const arr = glossGroups.get(m) ?? [];
-      arr.push(w.entSeq);
-      glossGroups.set(m, arr);
+      const group = glossGroups.get(m) ?? { key: m, label: m, members: [] };
+      group.members.push({ entryId: wordEntryId(w.entSeq), rank: wordHubRank(w) });
+      glossGroups.set(m, group);
     }
   }
-  const sharedSenseRaw: Link[] = [];
-  for (const entSeqs of glossGroups.values()) {
-    if (entSeqs.length < 2) continue;
-    for (let i = 0; i < entSeqs.length; i += 1) {
-      for (let j = i + 1; j < entSeqs.length; j += 1) {
-        const a = entSeqs[i];
-        const b = entSeqs[j];
-        if (a === undefined || b === undefined || a === b) continue;
-        addSymmetric(
-          sharedSenseRaw,
-          wordEntryId(a),
-          wordEntryId(b),
-          'semantic',
-          'shared_sense',
-          0.4,
-          'jmdict',
-        );
-      }
-    }
-  }
-  pushAll(out, capPerEntry(sharedSenseRaw, SHARED_SENSE_CAP));
+  const glossHubsRaw = buildHubs('gloss', glossGroups.values());
+  const { result: glossHubs, dropped: glossHubsDropped } = capHubSize(glossHubsRaw, GLOSS_HUB_SIZE_CAP);
 
-  return out;
+  return { hubs: mergeHubResults(synsetHubs, glossHubs), glossHubsDropped };
 }

@@ -15,11 +15,12 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, runMigrations, type AppDatabase } from 'api/db/client';
-import { kanji, vocabularyItems, radicals, components, links } from 'api/db/schema';
+import { kanji, vocabularyItems, radicals, components, links, hubs, hubMembers } from 'api/db/schema';
 import type { Kanji, VocabularyItem, Radical, Component, Link } from '@japanesesite/shared';
 import { sql } from 'drizzle-orm';
 import { PROCESSED, SEED, REPO_ROOT } from '../lib/paths.js';
 import { readJsonlAll } from '../lib/jsonl.js';
+import type { HubRecord, HubMemberRecord } from '../lib/hubRecords.js';
 
 const BATCH_SIZE = 500;
 
@@ -166,6 +167,34 @@ async function loadLinks(app: AppDatabase, rows: Link[]): Promise<void> {
   }
 }
 
+async function loadHubs(app: AppDatabase, rows: HubRecord[]): Promise<void> {
+  for (const batch of chunks(rows, BATCH_SIZE)) {
+    await app.db.transaction(async (tx) => {
+      await tx
+        .insert(hubs)
+        .values(batch.map((h) => ({ hubId: h.hubId, kind: h.kind, label: h.label, memberCount: h.memberCount })))
+        .onConflictDoUpdate({
+          target: hubs.hubId,
+          set: { kind: sql`excluded.kind`, label: sql`excluded.label`, memberCount: sql`excluded.member_count` },
+        });
+    });
+  }
+}
+
+async function loadHubMembers(app: AppDatabase, rows: HubMemberRecord[]): Promise<void> {
+  for (const batch of chunks(rows, BATCH_SIZE)) {
+    await app.db.transaction(async (tx) => {
+      await tx
+        .insert(hubMembers)
+        .values(batch.map((m) => ({ hubId: m.hubId, entryId: m.entryId, rank: m.rank })))
+        .onConflictDoUpdate({
+          target: [hubMembers.hubId, hubMembers.entryId],
+          set: { rank: sql`excluded.rank` },
+        });
+    });
+  }
+}
+
 async function main(): Promise<void> {
   const dirArg = process.argv.find((a) => a.startsWith('--dir='));
   const which = dirArg ? dirArg.split('=')[1] : 'processed';
@@ -180,16 +209,18 @@ async function main(): Promise<void> {
     console.log('  migrations applied.');
 
     console.log('\nrow counts before load:');
-    for (const t of ['kanji', 'vocabulary_items', 'radicals', 'components', 'links']) {
+    for (const t of ['kanji', 'vocabulary_items', 'radicals', 'components', 'links', 'hubs', 'hub_members']) {
       console.log(`  ${t}: ${await countRows(app, t)}`);
     }
 
-    const [kanjiRows, wordRows, radicalRows, componentRows, linkRows] = await Promise.all([
+    const [kanjiRows, wordRows, radicalRows, componentRows, linkRows, hubRows, hubMemberRows] = await Promise.all([
       readJsonlAll<Kanji>(paths.kanji),
       readJsonlAll<VocabularyItem>(paths.words),
       readJsonlAll<Radical>(paths.radicals),
       readJsonlAll<Component>(paths.components),
       readJsonlAll<Link>(paths.links),
+      readJsonlAll<HubRecord>(paths.hubs),
+      readJsonlAll<HubMemberRecord>(paths.hubMembers),
     ]);
 
     console.log('\nupserting kanji...');
@@ -202,9 +233,13 @@ async function main(): Promise<void> {
     await loadComponents(app, componentRows);
     console.log('upserting links...');
     await loadLinks(app, linkRows);
+    console.log('upserting hubs...');
+    await loadHubs(app, hubRows);
+    console.log('upserting hub members...');
+    await loadHubMembers(app, hubMemberRows);
 
     console.log('\nrow counts after load:');
-    for (const t of ['kanji', 'vocabulary_items', 'radicals', 'components', 'links']) {
+    for (const t of ['kanji', 'vocabulary_items', 'radicals', 'components', 'links', 'hubs', 'hub_members']) {
       console.log(`  ${t}: ${await countRows(app, t)}`);
     }
 

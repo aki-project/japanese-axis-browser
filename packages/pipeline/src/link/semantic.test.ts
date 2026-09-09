@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { JMdictEntry } from '../parsers/jmdict.js';
 import type { WordnetEntry } from '../parsers/wordnet.js';
 import type { VocabularyItem } from '@japanesesite/shared';
-import { buildSemanticLinks } from './semantic.js';
+import { GLOSS_HUB_SIZE_CAP, buildSemanticHubs, buildSemanticLinks } from './semantic.js';
 
 function word(overrides: Partial<VocabularyItem> & { entSeq: number; surface: string; reading: string }): VocabularyItem {
   return {
@@ -23,8 +23,8 @@ function entry(overrides: Partial<JMdictEntry> & { entSeq: number }): JMdictEntr
 }
 
 // Five-word fixture: 行く -see_also-> 見る (via xref); 早い -antonym-> 遅い
-// (via ant); 行く and 早い share a WordNet synset (synonym); 見る and 見物
-// share the exact gloss "to look" (shared_sense).
+// (via ant); 行く and 早い share a WordNet synset (synonym hub); 見る and
+// 見物 share the exact gloss "to look" (shared_sense/gloss hub).
 const words: VocabularyItem[] = [
   word({ entSeq: 1, surface: '行く', reading: 'いく', meanings: ['to go'] }),
   word({ entSeq: 2, surface: '見る', reading: 'みる', meanings: ['to see', 'to look'] }),
@@ -54,7 +54,7 @@ const wordnet: WordnetEntry[] = [
 ];
 
 describe('buildSemanticLinks', () => {
-  const links = buildSemanticLinks({ words, jmdictEntries, wordnet });
+  const links = buildSemanticLinks({ words, jmdictEntries });
 
   it('emits a see_also link both ways for a resolved xref', () => {
     expect(links).toContainEqual({
@@ -84,29 +84,73 @@ describe('buildSemanticLinks', () => {
     );
   });
 
-  it('emits a synonym link at weight 1.0 when both lemmas are primary matches', () => {
-    expect(links).toContainEqual({
-      fromEntryId: 'w:1',
-      toEntryId: 'w:3',
-      axis: 'semantic',
-      relation: 'synonym',
-      weight: 1.0,
-      source: 'wordnet',
-    });
+  it('never links an entry to itself', () => {
+    expect(links.every((l) => l.fromEntryId !== l.toEntryId)).toBe(true);
   });
 
-  it('emits a shared_sense link for words with an exact matching gloss string', () => {
-    expect(links).toContainEqual(
-      expect.objectContaining({
-        fromEntryId: 'w:2',
-        toEntryId: 'w:5',
-        relation: 'shared_sense',
-        weight: 0.4,
-      }),
+  it('carries no synonym or shared_sense links - those are hubs now', () => {
+    expect(links.some((l) => l.relation === 'synonym')).toBe(false);
+    expect(links.some((l) => l.relation === 'shared_sense')).toBe(false);
+  });
+});
+
+describe('buildSemanticHubs', () => {
+  it('groups words sharing a WordNet synset into a synset hub, labelled by a representative lemma', () => {
+    const { hubs } = buildSemanticHubs({ words, wordnet });
+    const hub = hubs.hubs.find((h) => h.hubId === 'h:synset:s1');
+    expect(hub?.memberCount).toBe(2);
+    expect(hub?.label).toBe('早い'); // lexicographically first primary lemma
+    expect(hubs.members.filter((m) => m.hubId === 'h:synset:s1').map((m) => m.entryId).sort()).toEqual(
+      ['w:1', 'w:3'].sort(),
     );
   });
 
-  it('never links an entry to itself', () => {
-    expect(links.every((l) => l.fromEntryId !== l.toEntryId)).toBe(true);
+  it('falls back to the synset ID as the label when no lemma resolves to a primary match', () => {
+    // Both lemmas resolve to a word only via an alternate surface, never
+    // the word's own primary surface/reading, so neither counts as "primary".
+    const wordsForFallback: VocabularyItem[] = [
+      word({ entSeq: 10, surface: '甲', reading: 'こう', alternateSurfaces: ['alt-a'], meanings: ['x'] }),
+      word({ entSeq: 11, surface: '乙', reading: 'おつ', alternateSurfaces: ['alt-b'], meanings: ['y'] }),
+    ];
+    const wordnetNonPrimary: WordnetEntry[] = [
+      { synset: 's9', lemma: 'alt-a', source: 'auto' },
+      { synset: 's9', lemma: 'alt-b', source: 'auto' },
+    ];
+    const { hubs } = buildSemanticHubs({ words: wordsForFallback, wordnet: wordnetNonPrimary });
+    const hub = hubs.hubs.find((h) => h.hubId === 'h:synset:s9');
+    expect(hub?.memberCount).toBe(2);
+    expect(hub?.label).toBe('s9');
+  });
+
+  it('groups words sharing an exact gloss string into a gloss hub', () => {
+    const { hubs } = buildSemanticHubs({ words, wordnet: [] });
+    const hub = hubs.hubs.find((h) => h.hubId === 'h:gloss:to look');
+    expect(hub?.memberCount).toBe(2);
+    expect(hub?.label).toBe('to look');
+    expect(hubs.members.filter((m) => m.hubId === 'h:gloss:to look').map((m) => m.entryId).sort()).toEqual(
+      ['w:2', 'w:5'].sort(),
+    );
+  });
+
+  it('does not create a gloss hub for a gloss used by only one word', () => {
+    const { hubs } = buildSemanticHubs({ words, wordnet: [] });
+    expect(hubs.hubs.some((h) => h.hubId === 'h:gloss:to go')).toBe(false);
+  });
+
+  it('drops any gloss hub with more than the size cap members, and reports the count', () => {
+    const manyWords: VocabularyItem[] = Array.from({ length: GLOSS_HUB_SIZE_CAP + 5 }, (_, i) =>
+      word({ entSeq: 1000 + i, surface: `w${i}`, reading: `r${i}`, meanings: ['to do'] }),
+    );
+    const { hubs, glossHubsDropped } = buildSemanticHubs({ words: manyWords, wordnet: [] });
+    expect(hubs.hubs.some((h) => h.hubId === 'h:gloss:to do')).toBe(false);
+    expect(glossHubsDropped).toBe(1);
+  });
+
+  it('member_count always equals the number of membership rows written for that hub', () => {
+    const { hubs } = buildSemanticHubs({ words, wordnet });
+    for (const hub of hubs.hubs) {
+      const rows = hubs.members.filter((m) => m.hubId === hub.hubId).length;
+      expect(hub.memberCount).toBe(rows);
+    }
   });
 });

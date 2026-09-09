@@ -37,6 +37,8 @@ export const PROCESSED = {
   radicals: path.join(PROCESSED_DIR, 'radicals.jsonl'),
   components: path.join(PROCESSED_DIR, 'components.jsonl'),
   links: path.join(PROCESSED_DIR, 'links.jsonl'),
+  hubs: path.join(PROCESSED_DIR, 'hubs.jsonl'),
+  hubMembers: path.join(PROCESSED_DIR, 'hub_members.jsonl'),
 };
 
 export const SEED = {
@@ -45,4 +47,6 @@ export const SEED = {
   radicals: path.join(SEED_DIR, 'radicals.jsonl'),
   components: path.join(SEED_DIR, 'components.jsonl'),
   links: path.join(SEED_DIR, 'links.jsonl'),
+  hubs: path.join(SEED_DIR, 'hubs.jsonl'),
+  hubMembers: path.join(SEED_DIR, 'hub_members.jsonl'),
 };

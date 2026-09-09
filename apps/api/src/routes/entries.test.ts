@@ -5,7 +5,15 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../app.js';
 import { createDb, runMigrations, type AppDatabase } from '../db/client.js';
-import { kanji, links, sentenceEntries, sentences, vocabularyItems } from '../db/schema.js';
+import {
+  hubMembers,
+  hubs,
+  kanji,
+  links,
+  sentenceEntries,
+  sentences,
+  vocabularyItems,
+} from '../db/schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const migrationsFolder = path.resolve(__dirname, '../../drizzle');
@@ -158,6 +166,35 @@ beforeAll(async () => {
       audioUrl: null,
       searchKey: 'にほんせい',
     },
+    // Two words with no pairwise relation to anything above, used only
+    // to test the semantic synset hub and the "same partner via both a
+    // hub and a pairwise link, under different relations" case.
+    {
+      entSeq: 2001,
+      surface: 'アルファ',
+      reading: 'あるふぁ',
+      alternateSurfaces: [],
+      alternateReadings: [],
+      meanings: ['alpha'],
+      partsOfSpeech: ['noun'],
+      jlptLevel: null,
+      isCommon: false,
+      audioUrl: null,
+      searchKey: 'あるふぁ',
+    },
+    {
+      entSeq: 2002,
+      surface: 'ベータ',
+      reading: 'べーた',
+      alternateSurfaces: [],
+      alternateReadings: [],
+      meanings: ['beta'],
+      partsOfSpeech: ['noun'],
+      jlptLevel: null,
+      isCommon: false,
+      audioUrl: null,
+      searchKey: 'べーた',
+    },
   ]);
 
   await db.insert(sentences).values([
@@ -178,24 +215,68 @@ beforeAll(async () => {
     { sentenceId: 5000, entryId: 'k:語' },
   ]);
 
+  // Only PAIRWISE_RELATIONS live in `links` now (synonym and homophone
+  // moved to hubs below): contains_kanji, see_also, and antonym here.
   await db.insert(links).values([
     // structural: w:1001 (日本語) is made of the three kanji, tied weight -> toEntryId asc
     { fromEntryId: 'w:1001', toEntryId: 'k:日', axis: 'structural', relation: 'contains_kanji', weight: 1, source: 'test' },
     { fromEntryId: 'w:1001', toEntryId: 'k:本', axis: 'structural', relation: 'contains_kanji', weight: 1, source: 'test' },
     { fromEntryId: 'w:1001', toEntryId: 'k:語', axis: 'structural', relation: 'contains_kanji', weight: 1, source: 'test' },
-    // semantic: w:1001 relates to w:1002 and w:1003
-    { fromEntryId: 'w:1001', toEntryId: 'w:1002', axis: 'semantic', relation: 'synonym', weight: 0.8, source: 'test' },
+    // semantic: w:1001's only remaining pairwise relation
     { fromEntryId: 'w:1001', toEntryId: 'w:1003', axis: 'semantic', relation: 'see_also', weight: 0.4, source: 'test' },
-    // phonetic: w:1001 has one phonetic link with a null weight
-    { fromEntryId: 'w:1001', toEntryId: 'w:1003', axis: 'phonetic', relation: 'homophone', weight: null, source: 'test' },
     // k:日 has a single semantic link, used to check linkCounts differ per entry
     { fromEntryId: 'k:日', toEntryId: 'w:1002', axis: 'semantic', relation: 'see_also', weight: 0.5, source: 'test' },
-    // k:語 has one real phonetic link and one to a target that was
-    // never loaded into vocabulary_items (a dangling reference): both
-    // the entry page's linkCounts and the /links endpoint's total must
-    // agree that this axis has exactly one (real) link.
-    { fromEntryId: 'k:語', toEntryId: 'w:1003', axis: 'phonetic', relation: 'homophone', weight: 0.6, source: 'test' },
-    { fromEntryId: 'k:語', toEntryId: 'w:8888', axis: 'phonetic', relation: 'homophone', weight: 0.9, source: 'test' },
+    // w:2001 and w:2002 also share a hub-derived `synonym` relation
+    // (below): this pairwise `antonym` row makes the same partner
+    // (w:2002) reachable from w:2001 under two different relations on
+    // the same axis, which must count and list twice, once per
+    // relation - never deduped the way same-kind-hub overlap is.
+    { fromEntryId: 'w:2001', toEntryId: 'w:2002', axis: 'semantic', relation: 'antonym', weight: 0.9, source: 'test' },
+  ]);
+
+  // Family relations, materialized as hubs + memberships instead of
+  // pairwise rows (CLAUDE.md's "Two storage shapes").
+  await db.insert(hubs).values([
+    { hubId: 'h:radical:日', kind: 'radical', label: '日', memberCount: 4 },
+    { hubId: 'h:on:ダミー', kind: 'on', label: 'ダミー', memberCount: 3 },
+    // A second, distinct on-reading hub that 壱 also belongs to,
+    // sharing a member (弐) with the first: proves that a partner
+    // reachable through two hubs of the same kind counts once.
+    { hubId: 'h:on:ダミー2', kind: 'on', label: 'ダミー2', memberCount: 2 },
+    { hubId: 'h:synset:group1', kind: 'synset', label: 'alpha/beta', memberCount: 2 },
+    // One real member (w:1003) and one dangling member (w:9999, never
+    // loaded into vocabulary_items): proves a hub member with no entry
+    // row does not inflate counts.
+    { hubId: 'h:gloss:てすと', kind: 'gloss', label: 'てすと', memberCount: 3 },
+  ]);
+
+  await db.insert(hubMembers).values([
+    // Radical hub: k:日's siblings are k:本, k:語, k:峠 (self excluded).
+    // k:峠 has a null rank, used to test that null sorts last.
+    { hubId: 'h:radical:日', entryId: 'k:日', rank: 0 },
+    { hubId: 'h:radical:日', entryId: 'k:本', rank: 0 },
+    { hubId: 'h:radical:日', entryId: 'k:語', rank: 1 },
+    { hubId: 'h:radical:日', entryId: 'k:峠', rank: null },
+
+    // On-reading hub #1: k:壱's siblings include 弐 (rank 1) and 参 (rank 2).
+    { hubId: 'h:on:ダミー', entryId: 'k:壱', rank: 0 },
+    { hubId: 'h:on:ダミー', entryId: 'k:弐', rank: 1 },
+    { hubId: 'h:on:ダミー', entryId: 'k:参', rank: 2 },
+    // On-reading hub #2: also relates 壱 and 弐, with a lower (better)
+    // rank for 弐 than hub #1 gave it - the deduped result must keep
+    // the lowest rank (0), not the first-seen one.
+    { hubId: 'h:on:ダミー2', entryId: 'k:壱', rank: 0 },
+    { hubId: 'h:on:ダミー2', entryId: 'k:弐', rank: 0 },
+
+    // Synset hub: w:2001's only hub-derived sibling is w:2002.
+    { hubId: 'h:synset:group1', entryId: 'w:2001', rank: 0 },
+    { hubId: 'h:synset:group1', entryId: 'w:2002', rank: 1 },
+
+    // Gloss hub: k:語's only real shared_sense sibling is w:1003; the
+    // w:9999 membership is dangling and must not inflate the count.
+    { hubId: 'h:gloss:てすと', entryId: 'k:語', rank: 0 },
+    { hubId: 'h:gloss:てすと', entryId: 'w:9999', rank: 1 },
+    { hubId: 'h:gloss:てすと', entryId: 'w:1003', rank: 2 },
   ]);
 
   app = await buildApp({ db });
@@ -236,7 +317,8 @@ describe('GET /api/entries/:entryId', () => {
     expect(body.kind).toBe('kanji');
     if (body.kind !== 'kanji') throw new Error('unreachable');
     expect(body.kanji.literal).toBe('日');
-    expect(body.linkCounts).toEqual({ semantic: 1, phonetic: 0, structural: 0 });
+    // structural: 3 hub-derived siblings (本, 語, 峠) via the radical hub.
+    expect(body.linkCounts).toEqual({ semantic: 1, phonetic: 0, structural: 3 });
   });
 
   it('returns a word entry with sentences and link counts across axes', async () => {
@@ -246,7 +328,9 @@ describe('GET /api/entries/:entryId', () => {
     expect(body.kind).toBe('word');
     if (body.kind !== 'word') throw new Error('unreachable');
     expect(body.word.surface).toBe('日本語');
-    expect(body.linkCounts).toEqual({ semantic: 2, phonetic: 1, structural: 3 });
+    // synonym and homophone are now hub-derived elsewhere in the
+    // fixture; w:1001's only remaining semantic relation is see_also.
+    expect(body.linkCounts).toEqual({ semantic: 1, phonetic: 0, structural: 3 });
 
     expect(body.sentences).toHaveLength(1);
     expect(body.sentences[0]?.tatoebaId).toBe(5000);
@@ -258,23 +342,40 @@ describe('GET /api/entries/:entryId', () => {
     expect(res.headers['cache-control']).toBe('public, max-age=86400');
   });
 
-  it('agrees with the /links endpoint total when a link points to an unloaded target', async () => {
+  it('agrees with the /links endpoint total when a hub member points to an unloaded target', async () => {
     const entryRes = await app.inject({ method: 'GET', url: '/api/entries/k:語' });
     const entryBody = entryResponseSchema.parse(entryRes.json());
 
-    const linksRes = await app.inject({ method: 'GET', url: '/api/entries/k:語/links?axis=phonetic' });
+    const linksRes = await app.inject({ method: 'GET', url: '/api/entries/k:語/links?axis=semantic' });
     const linksBody = linksResponseSchema.parse(linksRes.json());
-    const phonetic = linksBody.axes[0];
+    const semantic = linksBody.axes[0];
 
-    // Two phonetic rows exist in the fixture, but one targets an entry
-    // that was never loaded (w:8888): both endpoints must exclude it
-    // and agree on a count of exactly 1.
-    expect(entryBody.linkCounts.phonetic).toBe(1);
-    expect(phonetic?.total).toBe(1);
-    expect(entryBody.linkCounts.phonetic).toBe(phonetic?.total);
-    expect(phonetic?.relations.flatMap((r) => r.entries).map((e) => e.entry.entryId)).toEqual([
+    // The gloss hub k:語 belongs to has three members: k:語 itself,
+    // w:1003 (real), and w:9999 (never loaded into vocabulary_items).
+    // Both endpoints must exclude the dangling member and agree on a
+    // count of exactly 1.
+    expect(entryBody.linkCounts.semantic).toBe(1);
+    expect(semantic?.total).toBe(1);
+    expect(entryBody.linkCounts.semantic).toBe(semantic?.total);
+    expect(semantic?.relations.flatMap((r) => r.entries).map((e) => e.entry.entryId)).toEqual([
       'w:1003',
     ]);
+  });
+
+  it('does not let a partner reachable via two hubs of the same kind inflate the count', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/entries/k:壱' });
+    const body = entryResponseSchema.parse(res.json());
+    // k:壱 belongs to two "on" hubs, both of which include 弐, plus one
+    // that also includes 参: deduped, that is 2 distinct siblings, not 3.
+    expect(body.linkCounts).toEqual({ semantic: 0, phonetic: 2, structural: 0 });
+  });
+
+  it('counts the same partner twice when it is both a pairwise link and a hub sibling under a different relation', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/entries/w:2001' });
+    const body = entryResponseSchema.parse(res.json());
+    // w:2002 is a synset-hub sibling (synonym) and a pairwise antonym
+    // target: two distinct (relation, partner) facts, not deduped.
+    expect(body.linkCounts).toEqual({ semantic: 2, phonetic: 0, structural: 0 });
   });
 });
 
@@ -301,7 +402,58 @@ describe('GET /api/entries/:entryId/links', () => {
     const body = linksResponseSchema.parse(res.json());
     const semantic = body.axes[0];
     const allEntries = semantic?.relations.flatMap((r) => r.entries) ?? [];
-    expect(allEntries.map((e) => e.entry.entryId)).toEqual(['w:1002', 'w:1003']);
+    expect(allEntries.map((e) => e.entry.entryId)).toEqual(['w:1003']);
+  });
+
+  it('merges a hub-derived sibling with a pairwise link on the same axis, grouped under their own relations', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/entries/w:2001/links?axis=semantic' });
+    const body = linksResponseSchema.parse(res.json());
+    const semantic = body.axes[0];
+    expect(semantic?.total).toBe(2);
+
+    const synonym = semantic?.relations.find((r) => r.relation === 'synonym');
+    const antonym = semantic?.relations.find((r) => r.relation === 'antonym');
+    expect(synonym?.entries.map((e) => e.entry.entryId)).toEqual(['w:2002']);
+    expect(antonym?.entries.map((e) => e.entry.entryId)).toEqual(['w:2002']);
+  });
+
+  it('walks a hub-backed axis via limit=1, ordering by rank ascending with a null rank last, no repeats', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const qs = new URLSearchParams({ axis: 'structural', limit: '1' });
+      if (cursor) qs.set('cursor', cursor);
+      const res = await app.inject({ method: 'GET', url: `/api/entries/k:日/links?${qs}` });
+      const body = linksResponseSchema.parse(res.json());
+      const structural = body.axes[0];
+      const page = structural?.relations.flatMap((r) => r.entries) ?? [];
+      expect(page.length).toBeLessThanOrEqual(1);
+      // The entry never appears among its own siblings.
+      for (const e of page) expect(e.entry.entryId).not.toBe('k:日');
+      for (const e of page) seen.push(e.entry.entryId);
+      if (!structural?.nextCursor) break;
+      cursor = structural.nextCursor;
+    }
+    // k:本 (rank 0) and k:語 (rank 1) sort before k:峠 (null rank last).
+    expect(seen).toEqual(['k:本', 'k:語', 'k:峠']);
+  });
+
+  it('dedupes a same-kind-hub partner and excludes the entry itself, and axis filtering only queries requested relations', async () => {
+    const phoneticRes = await app.inject({ method: 'GET', url: '/api/entries/k:壱/links?axis=phonetic' });
+    const phoneticBody = linksResponseSchema.parse(phoneticRes.json());
+    const phonetic = phoneticBody.axes[0];
+    expect(phonetic?.total).toBe(2);
+    const entries = phonetic?.relations.flatMap((r) => r.entries) ?? [];
+    expect(entries.map((e) => e.entry.entryId)).toEqual(['k:弐', 'k:参']);
+    expect(entries.map((e) => e.entry.entryId)).not.toContain('k:壱');
+
+    // k:壱 has no structural hub or pairwise data at all: requesting a
+    // different axis must not leak its phonetic siblings in.
+    const structuralRes = await app.inject({ method: 'GET', url: '/api/entries/k:壱/links?axis=structural' });
+    const structuralBody = linksResponseSchema.parse(structuralRes.json());
+    const structural = structuralBody.axes[0];
+    expect(structural?.total).toBe(0);
+    expect(structural?.relations).toEqual([]);
   });
 
   it('walks every link on an axis via limit=1 pagination without skipping or repeating', async () => {

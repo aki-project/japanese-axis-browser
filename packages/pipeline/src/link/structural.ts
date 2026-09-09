@@ -1,8 +1,9 @@
 /**
  * Structural axis: word -> each kanji it contains, kanji -> its
- * radical/components, and kanji sharing a radical or a non-radical
- * component. Source is always decomposition data (KRADFILE/RADKFILE/IDS
- * via the kanji.components/kanji.radical fields already computed in the
+ * radical/components (pairwise), and kanji sharing a radical or a
+ * non-radical component (family relations - see buildStructuralHubs).
+ * Source is always decomposition data (KRADFILE/RADKFILE/IDS via the
+ * kanji.components/kanji.radical fields already computed in the
  * transform stage), never string matching on characters.
  *
  * Note on the entry ID scheme: only kanji (`k:<literal>`) and words
@@ -15,21 +16,18 @@
  */
 import { kanjiEntryId, wordEntryId } from '@japanesesite/shared';
 import type { Kanji, Link, VocabularyItem } from '@japanesesite/shared';
-import { addDirectedPair, buildCappedGroupLinks, pushAll, wordWeightTier } from './common.js';
-
-const SHARED_RADICAL_CAP = 30;
-const SHARED_PHONETIC_COMPONENT_CAP = 30;
+import { addDirectedPair, wordWeightTier } from './common.js';
+import { buildHubs, mergeHubResults, type HubBuildResult, type HubGroupInput } from './hubs.js';
 
 export interface StructuralLinkInputs {
   words: VocabularyItem[];
   kanji: Kanji[];
 }
 
+/** contains_kanji/contained_in and has_component/component_of: pairwise links. */
 export function buildStructuralLinks(inputs: StructuralLinkInputs): Link[] {
   const out: Link[] = [];
   const kanjiSet = new Set(inputs.kanji.map((k) => k.literal));
-  const freqOf = new Map(inputs.kanji.map((k) => [k.literal, k.frequency]));
-  const rank = (literal: string): number | null => freqOf.get(literal) ?? null;
 
   // --- word -> each kanji it contains, and the reverse under 'contained_in'
   // (so a word's page reads "contains kanji" and a kanji's page reads
@@ -76,51 +74,35 @@ export function buildStructuralLinks(inputs: StructuralLinkInputs): Link[] {
     }
   }
 
+  return out;
+}
+
+/** shared_radical/shared_phonetic_component: family relations, built as hubs. */
+export function buildStructuralHubs(inputs: Pick<StructuralLinkInputs, 'kanji'>): HubBuildResult {
+  const freqOf = new Map(inputs.kanji.map((k) => [k.literal, k.frequency]));
+  const kanjiRank = (literal: string): number | null => freqOf.get(literal) ?? null;
+
   // --- kanji sharing a radical ---
-  const radicalGroups = new Map<string, string[]>();
+  const radicalGroups = new Map<string, HubGroupInput>();
   for (const k of inputs.kanji) {
     if (!k.radical) continue;
-    const arr = radicalGroups.get(k.radical) ?? [];
-    arr.push(k.literal);
-    radicalGroups.set(k.radical, arr);
+    const group = radicalGroups.get(k.radical) ?? { key: k.radical, label: k.radical, members: [] };
+    group.members.push({ entryId: kanjiEntryId(k.literal), rank: kanjiRank(k.literal) });
+    radicalGroups.set(k.radical, group);
   }
-  pushAll(
-    out,
-    buildCappedGroupLinks(
-      radicalGroups.values(),
-      kanjiEntryId,
-      rank,
-      SHARED_RADICAL_CAP,
-      'structural',
-      'shared_radical',
-      0.5,
-      'kradfile',
-    ),
-  );
+  const radicalHubs = buildHubs('radical', radicalGroups.values());
 
   // --- kanji sharing a non-radical component ---
-  const componentGroups = new Map<string, string[]>();
+  const componentGroups = new Map<string, HubGroupInput>();
   for (const k of inputs.kanji) {
     for (const comp of k.components) {
       if (comp === k.radical) continue;
-      const arr = componentGroups.get(comp) ?? [];
-      arr.push(k.literal);
-      componentGroups.set(comp, arr);
+      const group = componentGroups.get(comp) ?? { key: comp, label: comp, members: [] };
+      group.members.push({ entryId: kanjiEntryId(k.literal), rank: kanjiRank(k.literal) });
+      componentGroups.set(comp, group);
     }
   }
-  pushAll(
-    out,
-    buildCappedGroupLinks(
-      componentGroups.values(),
-      kanjiEntryId,
-      rank,
-      SHARED_PHONETIC_COMPONENT_CAP,
-      'structural',
-      'shared_phonetic_component',
-      0.6,
-      'ids',
-    ),
-  );
+  const componentHubs = buildHubs('component', componentGroups.values());
 
-  return out;
+  return mergeHubResults(radicalHubs, componentHubs);
 }

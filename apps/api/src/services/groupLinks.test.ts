@@ -205,6 +205,44 @@ describe('groupLinks', () => {
     expect(semanticSeen).toEqual(['w:1', 'w:2']);
   });
 
+  it('uses an authoritative total instead of rows.length when the caller supplies a partial page', () => {
+    // Simulates a hub-backed relation where the caller only fetched one
+    // page's worth of rows (see apps/api/src/db/queries.ts), but the
+    // true count (e.g. from getLinkCounts) is larger.
+    const rows: FlatLinkRow[] = [
+      { axis: 'structural', relation: 'shared_radical', toEntryId: 'k:一', weight: 0.5 },
+    ];
+    const summaries = new Map([['k:一', summary('k:一', '一')]]);
+
+    const [structural] = groupLinks({
+      rows,
+      summaries,
+      axes: ['structural'],
+      limit: 1,
+      totals: { structural: 3 },
+    });
+
+    expect(structural?.total).toBe(3);
+    // hasMore is derived from the authoritative total, not rows.length,
+    // so a nextCursor is still produced even though only one row was
+    // supplied.
+    expect(structural?.nextCursor).not.toBeNull();
+  });
+
+  it('falls back to counting rows when no total is supplied for an axis', () => {
+    const rows: FlatLinkRow[] = [
+      { axis: 'semantic', relation: 'synonym', toEntryId: 'w:1', weight: 0.5 },
+      { axis: 'semantic', relation: 'synonym', toEntryId: 'w:2', weight: 0.4 },
+    ];
+    const summaries = new Map([
+      ['w:1', summary('w:1', '一')],
+      ['w:2', summary('w:2', '二')],
+    ]);
+
+    const [semantic] = groupLinks({ rows, summaries, axes: ['semantic'], limit: 50, totals: {} });
+    expect(semantic?.total).toBe(2);
+  });
+
   it('walks every row via limit=1 even when two rows share (weight, toEntryId) under different relations', () => {
     const rows: FlatLinkRow[] = [
       { axis: 'phonetic', relation: 'homophone', toEntryId: 'w:1', weight: 0.5 },

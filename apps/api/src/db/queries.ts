@@ -1,12 +1,39 @@
-import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
-import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { HIRAGANA_CHARS, KATAKANA_CHARS, parseEntryId } from '@japanesesite/shared';
-import type { Axis, EntryId, EntrySummary, Sentence } from '@japanesesite/shared';
+import { and, asc, desc, eq, inArray, min, ne, or, sql } from 'drizzle-orm';
+import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import {
+  HIRAGANA_CHARS,
+  HUB_KIND_RELATION,
+  KATAKANA_CHARS,
+  parseEntryId,
+} from '@japanesesite/shared';
+import type { Axis, EntryId, EntrySummary, HubKind, Relation, Sentence } from '@japanesesite/shared';
 import { kanjiRowToSummary, wordRowToSummary, type KanjiRow } from '../services/entrySummary.js';
 import type { FlatLinkRow } from '../services/groupLinks.js';
+import type { LinkCursor } from '../services/cursor.js';
+import { hubWeightBaseFor } from '../services/hubWeights.js';
 import { mergeSearchResults, type TieredEntry } from '../services/searchRanking.js';
 import type { Db } from './client.js';
-import { kanji, links, sentenceEntries, sentences, vocabularyItems } from './schema.js';
+import { hubMembers, hubs, kanji, links, sentenceEntries, sentences, vocabularyItems } from './schema.js';
+
+/** Inverse of HUB_KIND_RELATION: which hub kind serves a given (family) relation. */
+const HUB_KIND_BY_RELATION = new Map<Relation, HubKind>(
+  (Object.entries(HUB_KIND_RELATION) as [HubKind, { axis: Axis; relation: Relation }][]).map(
+    ([kind, v]) => [v.relation, kind],
+  ),
+);
+
+/** Inverse of HUB_KIND_RELATION, keyed by relation: which axis a family relation belongs to. */
+const AXIS_BY_FAMILY_RELATION = new Map<Relation, Axis>(
+  Object.values(HUB_KIND_RELATION).map((v) => [v.relation, v.axis]),
+);
+
+/** `EXISTS` check that `entryIdExpr` (an entry-ID text expression) names a loaded entry. */
+function entryExistsSql(entryIdExpr: AnyPgColumn) {
+  return sql`(
+    EXISTS (SELECT 1 FROM ${kanji} WHERE 'k:' || ${kanji.literal} = ${entryIdExpr})
+    OR EXISTS (SELECT 1 FROM ${vocabularyItems} WHERE 'w:' || ${vocabularyItems.entSeq}::text = ${entryIdExpr})
+  )`;
+}
 
 export type EntryRow =
   | { kind: 'kanji'; row: typeof kanji.$inferSelect }
@@ -40,33 +67,159 @@ export interface LinkCounts {
 }
 
 /**
- * Count of outgoing links per axis for an entry, restricted to links
- * whose target actually exists (in kanji or vocabulary_items). This
- * must match what /links reports as each axis's `total`, since
- * groupLinks() also drops links whose target has no loaded summary.
+ * Distinct partner count per family relation for an entry: the other
+ * members of every hub (of any kind) that the entry belongs to, deduped
+ * so a partner reachable through two hubs of the same kind counts
+ * once, excluding the entry itself and any member with no loaded entry
+ * row. One query covers every hub kind at once (grouped by kind), since
+ * GET /entries/:id wants all axes regardless of any axis filter.
  */
-export async function getLinkCounts(db: Db, entryId: string): Promise<LinkCounts> {
-  const rows = await db
-    .select({ axis: links.axis, count: sql<number>`count(*)::int` })
-    .from(links)
-    .where(
-      and(
-        eq(links.fromEntryId, entryId),
-        sql`(
-          EXISTS (SELECT 1 FROM ${kanji} WHERE 'k:' || ${kanji.literal} = ${links.toEntryId})
-          OR EXISTS (SELECT 1 FROM ${vocabularyItems} WHERE 'w:' || ${vocabularyItems.entSeq}::text = ${links.toEntryId})
-        )`,
-      ),
-    )
-    .groupBy(links.axis);
+async function getFamilySiblingCounts(db: Db, entryId: string): Promise<Partial<Record<Relation, number>>> {
+  const hm1 = alias(hubMembers, 'hm1');
+  const hm2 = alias(hubMembers, 'hm2');
 
-  const counts: LinkCounts = { semantic: 0, phonetic: 0, structural: 0 };
+  const perPartner = db
+    .select({ kind: hubs.kind, partnerId: hm2.entryId })
+    .from(hm1)
+    .innerJoin(hubs, eq(hubs.hubId, hm1.hubId))
+    .innerJoin(hm2, eq(hm2.hubId, hm1.hubId))
+    .where(and(eq(hm1.entryId, entryId), ne(hm2.entryId, entryId), entryExistsSql(hm2.entryId)))
+    .groupBy(hubs.kind, hm2.entryId)
+    .as('per_partner');
+
+  const rows = await db
+    .select({ kind: perPartner.kind, count: sql<number>`count(*)::int` })
+    .from(perPartner)
+    .groupBy(perPartner.kind);
+
+  const counts: Partial<Record<Relation, number>> = {};
   for (const r of rows) {
-    if (r.axis === 'semantic' || r.axis === 'phonetic' || r.axis === 'structural') {
-      counts[r.axis] = r.count;
-    }
+    const relation = HUB_KIND_RELATION[r.kind as HubKind]?.relation;
+    if (relation) counts[relation] = r.count;
   }
   return counts;
+}
+
+/**
+ * Count of outgoing links per axis for an entry: pairwise link rows
+ * (restricted to links whose target actually exists) plus hub-derived
+ * family siblings, per relation, from getFamilySiblingCounts. This must
+ * match what /links reports as each axis's `total` exactly - both read
+ * this same function - since groupLinks() also drops rows whose target
+ * has no loaded summary and dedupes same-kind-hub overlap the same way.
+ */
+export async function getLinkCounts(db: Db, entryId: string): Promise<LinkCounts> {
+  const [pairwiseRows, familyCounts] = await Promise.all([
+    db
+      .select({ axis: links.axis, count: sql<number>`count(*)::int` })
+      .from(links)
+      .where(and(eq(links.fromEntryId, entryId), entryExistsSql(links.toEntryId)))
+      .groupBy(links.axis),
+    getFamilySiblingCounts(db, entryId),
+  ]);
+
+  const counts: LinkCounts = { semantic: 0, phonetic: 0, structural: 0 };
+  for (const r of pairwiseRows) {
+    if (r.axis === 'semantic' || r.axis === 'phonetic' || r.axis === 'structural') {
+      counts[r.axis] += r.count;
+    }
+  }
+  for (const [relation, count] of Object.entries(familyCounts) as [Relation, number][]) {
+    const axis = AXIS_BY_FAMILY_RELATION.get(relation);
+    if (axis) counts[axis] += count;
+  }
+  return counts;
+}
+
+/**
+ * `row after cursor` predicate for a single relation's hub-sibling
+ * query, expressed in terms of that relation's SQL-computed `weight`
+ * (see getHubSiblingRows) so it composes correctly with pairwise rows
+ * and with other relations under the same weight-desc/toEntryId-asc/
+ * relation-asc total order used everywhere links are listed (see
+ * services/cursor.ts). Since `relation` is fixed for the whole query,
+ * the three-level comparator collapses to: strictly lower weight, or
+ * equal weight with a strictly greater entryId, or (only when this
+ * relation sorts after the cursor's relation) an exact tie on both.
+ */
+function afterCursorSql(
+  weightExpr: ReturnType<typeof sql<number>>,
+  entryIdCol: AnyPgColumn,
+  relation: Relation,
+  cursor: LinkCursor,
+) {
+  if (cursor.weight === null) {
+    // Every hub-derived row has a non-null computed weight, and null
+    // sorts last of all, so nothing here can come after a null-weight
+    // cursor: it would already be the very end of the axis.
+    return sql`false`;
+  }
+  const relationAfter = relation > cursor.relation;
+  return relationAfter
+    ? sql`(${weightExpr} < ${cursor.weight} OR (${weightExpr} = ${cursor.weight} AND ${entryIdCol} >= ${cursor.toEntryId}))`
+    : sql`(${weightExpr} < ${cursor.weight} OR (${weightExpr} = ${cursor.weight} AND ${entryIdCol} > ${cursor.toEntryId}))`;
+}
+
+/**
+ * Hub-derived siblings of `entryId` for one family relation: the other
+ * members of every hub (of the kind mapped to `relation`) that
+ * `entryId` belongs to, deduped so a partner reachable through two
+ * hubs of that kind counts once (keeping the lowest rank), excluding
+ * `entryId` itself and any member with no loaded entry row.
+ *
+ * Ordered by rank ascending (nulls last), then entry_id ascending -
+ * matching the hub_members(hub_id, rank, entry_id) index - via a
+ * `weight` computed with the same formula as
+ * rankToWeight(HUB_WEIGHT_BASE[relation], rank)
+ * (packages/shared/src/hubs.ts), so it merges correctly with pairwise
+ * rows and with other relations under a single weight-based order.
+ * Both LIMIT and the cursor predicate are pushed into this query: a hub
+ * can have 500+ members, so this never fetches them all to slice in
+ * memory.
+ */
+export async function getHubSiblingRows(
+  db: Db,
+  entryId: string,
+  relation: Relation,
+  cursor: LinkCursor | null,
+  limit: number,
+): Promise<FlatLinkRow[]> {
+  const kind = HUB_KIND_BY_RELATION.get(relation);
+  const base = hubWeightBaseFor(relation);
+  if (kind === undefined || base === undefined) return [];
+  const axis = HUB_KIND_RELATION[kind].axis;
+
+  const hm1 = alias(hubMembers, 'hm1');
+  const hm2 = alias(hubMembers, 'hm2');
+
+  const grouped = db
+    .select({
+      partnerId: hm2.entryId,
+      minRank: min(hm2.rank).as('min_rank'),
+    })
+    .from(hm1)
+    .innerJoin(hubs, eq(hubs.hubId, hm1.hubId))
+    .innerJoin(hm2, eq(hm2.hubId, hm1.hubId))
+    .where(and(eq(hm1.entryId, entryId), eq(hubs.kind, kind), ne(hm2.entryId, entryId)))
+    .groupBy(hm2.entryId)
+    .as('grouped');
+
+  // Mirrors rankToWeight(base, rank): a null rank is treated the same
+  // as the maximum-cap rank (2500), so COALESCE folds that case in
+  // rather than needing a separate branch.
+  const weightExpr = sql<number>`LEAST(1, GREATEST(0, ${base}::float8 * (1 - 0.6 * (LEAST(GREATEST(COALESCE(${grouped.minRank}, 2500), 0), 2500)::float8 / 2500))))`;
+
+  const conditions = [entryExistsSql(grouped.partnerId)];
+  if (cursor) conditions.push(afterCursorSql(weightExpr, grouped.partnerId, relation, cursor));
+
+  const rows = await db
+    .select({ partnerId: grouped.partnerId, weight: weightExpr })
+    .from(grouped)
+    .where(and(...conditions))
+    .orderBy(desc(weightExpr), asc(grouped.partnerId))
+    .limit(limit);
+
+  return rows.map((r) => ({ axis, relation, toEntryId: r.partnerId, weight: r.weight }));
 }
 
 /** Sentences that reference this entry, each with its full set of tagged entry IDs. */

@@ -12,7 +12,8 @@ A web application for exploring Japanese as a linguistic web. At any moment the 
 - **Navigation is the product.** Following a link replaces the active entry and pushes the previous one onto a trail. The trail is visible, and the learner can step back along it. The URL always identifies the active entry so any position in the web is shareable and reloadable.
 - **Axis filtering.** The learner can show one axis, several, or all. The chosen axes persist across navigation until changed.
 - **No user state.** The site is anonymous and read-only. There are no accounts and no user-specific tables. The only per-viewer state is axis visibility, kept in local storage.
-- Links are content, computed by the pipeline and stored, not inferred at request time. The API serves them; the frontend never derives relationships itself.
+- Relationships are content, computed by the pipeline and stored, not inferred at request time. The API serves them; the frontend never derives relationships itself.
+- **Two storage shapes.** A *pairwise* relation (A relates to B and to nothing else by that fact) is a row in `links`. A *family* relation ("everything that shares an X") is a **Hub** plus its memberships, and the API materializes siblings from it. Never store a family as pairwise edges: a family of k members costs k(k-1) rows and forces per-entry caps that hide members.
 
 ## Stack
 
@@ -68,7 +69,9 @@ docker compose up -d postgres
 Entity names are fixed. Use them in code, tables, and API paths.
 
 - **Entry** - the navigable unit. Either a Kanji or a VocabularyItem. Has a stable `entry_id` of the form `k:<literal>` or `w:<ent_seq>`. Entries are not a separate table; the ID scheme is the union.
-- **Link** - a stored edge between two entries: `from_entry_id`, `to_entry_id`, `axis` (`semantic` | `phonetic` | `structural`), `relation` (finer label within the axis, e.g. `synonym`, `antonym`, `homophone`, `shared_on_reading`, `contains_kanji`, `component_of`, `shared_radical`), optional `weight`, and `source`. Links are undirected in meaning but stored once per direction so lookups by `from_entry_id` are a single indexed query.
+- **Link** - a stored edge between two entries for a **pairwise** relation only: `from_entry_id`, `to_entry_id`, `axis`, `relation`, optional `weight`, and `source`. Stored once per direction so a lookup by `from_entry_id` is a single indexed query. The pairwise relations are `contains_kanji`, `contained_in`, `has_component`, `component_of`, `see_also`, and `antonym`.
+- **Hub** - the shared thing at the centre of a **family** relation: a radical, a component, an on reading, a kun reading, a word reading, a WordNet synset, or an English gloss. `hub_id` is `h:<kind>:<key>`, plus `kind`, `label` (what to display), and `member_count`. Hubs are not Entries and have no page of their own yet.
+- **HubMember** - an entry's membership in a hub: `hub_id`, `entry_id`, `rank` (lower sorts first; kanji use KANJIDIC2 frequency, words use a commonness and JLPT tier). Siblings of an entry on a family relation are the other members of its hubs.
 - **Radical** - character, name, stroke count. Referenced by Kanji.
 - **Component** - a kanji or non-kanji shape that appears inside other kanji, with an optional etymology note. Referenced by Kanji as parts.
 - **VocabularyItem** - surface form, kana reading, alternates, meanings, parts of speech, JLPT level, `is_common` (JMdict priority flag, used by the pipeline to filter and rank), optional audio URL, `search_key`. Source ID from JMdict `ent_seq`.
@@ -96,6 +99,7 @@ Not built now. When it is added, the only per-user data will be a learned or unl
 - REST paths: `/api/entries/:entryId`, `/api/entries/:entryId/links?axis=semantic,phonetic,structural`, `/api/entries/search?q=`. All routes are GET and public.
 - `/api/entries/:entryId` returns the full entry plus a summary count of links per axis so the page can render axis controls before links load.
 - Links are returned grouped by axis, then by relation, ordered by weight descending. Unfiltered link lists are paginated per axis.
+- The response shape does not distinguish pairwise from family relations. The API materializes family siblings from hubs at request time, derives their `weight` from `rank`, and merges them with the pairwise rows before grouping. A relation appears in exactly one of the two shapes, never both.
 - Error shape: `{ error: { code: string, message: string } }`.
 - Lists that can grow are paginated. Cursor-based, default 50.
 - Responses for entries and links are cacheable. Set `Cache-Control` with a long max-age; content changes only when the pipeline reloads.
@@ -106,10 +110,16 @@ Not built now. When it is added, the only per-user data will be a learned or unl
 ### Database
 - Every schema change is a new Drizzle migration. Never edit an applied migration.
 - `(from_entry_id, axis)` index on links is required. Links are upserted keyed on `(from_entry_id, to_entry_id, axis, relation)`.
+- Hub membership lives in `hubs(hub_id PK, kind, label, member_count)` and `hub_members(hub_id, entry_id, rank, PK(hub_id, entry_id))`, with an index on `(hub_id, rank, entry_id)` for ordered paging and one on `entry_id` for the entry-to-hubs lookup. Upserts key on the primary keys.
+- Each hub kind maps to exactly one axis and relation: `radical` to structural/`shared_radical`, `component` to structural/`shared_phonetic_component`, `on` to phonetic/`shared_on_reading`, `kun` to phonetic/`shared_kun_reading`, `reading` to phonetic/`homophone`, `synset` to semantic/`synonym`, `gloss` to semantic/`shared_sense`.
+- Family relations have no cap. A hub with 500 members is served by paging, not by truncation at load time.
+- Per-axis counts and paged results must agree exactly. Count distinct partner entries per relation, so an entry sharing two hubs of the same kind with the same partner counts once.
 - Seed and pipeline loads use upserts keyed on source IDs so re-runs update rather than duplicate.
 
 ### Pipeline
 - Link generation is its own stage, run after all entries are loaded. Each axis has a separate module with a documented rule for when a link is emitted, and unit tests on small fixtures.
+- The same stage emits hubs and memberships for the family relations. A hub with fewer than two members is dropped. `member_count` is written by the pipeline and must equal the number of membership rows.
+- Kun-reading hubs key on the full reading including okurigana, so 日 (ひ) and 彈 (ひ.く) do not share a hub. Prefix and suffix hyphens are stripped; the okurigana dot is removed and the parts joined.
 - Phonetic links are derived from readings, never from surface forms. Kana are compared as written; no hiragana-to-katakana folding outside the search-key field.
 - Structural links come from decomposition data, not from string matching on characters.
 - Every link records its `source` so a bad rule can be re-run without touching links from other sources.
@@ -139,8 +149,9 @@ Use the agents in `.claude/agents/` for work that fits their scope. `backend-dev
 
 Known gaps and decisions deferred at the end of the first build (2026-09-08). Not scheduled; pick up when asked.
 
-- **Link table scaling.** The six family relations (`shared_radical`, `shared_on_reading`, `shared_kun_reading`, `shared_phonetic_component`, `homophone`, `shared_sense`) are stored as pairwise edges and grow with the square of family size; caps of 30 partners per entry keep the table at 2.35M rows. Recommended replacement: keep `links` for the pairwise relations only and add membership tables (entry to hub) for the family relations, deriving siblings at query time. Hubs could later become navigable entries. The API response shape can stay unchanged initially.
-- **Kun-reading matching is weak.** `shared_kun_reading` matches on the kana before the okurigana dot, so 日 (ひ) links to 彈 (ひ.く). Tighten to require the full reading including okurigana, or bases only when neither side has okurigana.
+- **Hubs are not navigable.** A hub has no entry ID and no page. Giving hubs an `h:` entry kind would let a learner step to the radical 心 or the reading ニチ and see the whole family, which is closer to the linguistic-web idea than a sibling list. Needs an entry-ID change, a hub page, and a frontend route.
+- **Hub migration not independently reviewed.** The review agent for the hub change was cut short by an account spend limit. The change is covered by the test suite and by full pagination walks against the loaded data, and the SQL weight expression was hand-checked against `rankToWeight`, but no second pass has read it end to end.
+- **Kanji have no semantic links.** Japanese WordNet covers words only, so the semantic axis on any kanji page is empty. A kanji-side sense source, or deriving kanji senses from the words that contain them, would fill it.
 - **Unused indexes.** The two GIN indexes on `kanji.on_readings` and `kanji.kun_readings` are not used by any query; drop them in a new migration.
 - **Not checked in a real browser.** Layout, ruby rendering, and kana/kanji/Latin baseline alignment are verified only by jsdom tests and a production build.
 - **Version pins.** TypeScript 5.9, Vite 7, Vitest 4, and React Router 7 were pinned deliberately below the newest majors. Upgrade one at a time when wanted.

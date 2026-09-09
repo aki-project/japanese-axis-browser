@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Kanji, VocabularyItem } from '@japanesesite/shared';
-import { buildPhoneticLinks } from './phonetic.js';
-import { frequencyScaledWeight, wordWeightTier } from './common.js';
+import { buildPhoneticHubs } from './phonetic.js';
 
 function word(overrides: Partial<VocabularyItem> & { entSeq: number; surface: string; reading: string }): VocabularyItem {
   return {
@@ -32,10 +31,15 @@ function kanji(overrides: Partial<Kanji> & { literal: string }): Kanji {
   };
 }
 
-// Five-word fixture: 甲/好 share the reading こう (homophone); 早々 has an
-// alternate reading こう that also pairs it with them; 今日 has a distinct
+function hubMembers(result: ReturnType<typeof buildPhoneticHubs>, hubId: string) {
+  return result.members.filter((m) => m.hubId === hubId).map((m) => m.entryId).sort();
+}
+
+// Five-word fixture: 甲/好 share the reading こう (homophone hub); 早々 has
+// an alternate reading こう that also joins that hub; 今日 has a distinct
 // reading. Three kanji share the on-reading コウ (ranked by frequency);
-// 行 and 生 share a kun-reading base い.
+// 行 and 生 share a kun-reading base い but with different okurigana
+// (い.く vs い.きる), so they must NOT share a kun hub.
 const words: VocabularyItem[] = [
   word({ entSeq: 1, surface: '甲', reading: 'こう', isCommon: true, jlptLevel: 'N3' }),
   word({ entSeq: 2, surface: '好', reading: 'こう', isCommon: true, jlptLevel: 'N4' }),
@@ -49,81 +53,60 @@ const kanjiList: Kanji[] = [
   kanji({ literal: '校', onReadings: ['コウ'], kunReadings: [], frequency: 20 }),
   kanji({ literal: '生', kunReadings: ['い.きる'], frequency: 3 }),
   kanji({ literal: '本', onReadings: ['ホン'], frequency: 2 }),
+  kanji({ literal: '日', kunReadings: ['ひ'], frequency: 1 }),
+  kanji({ literal: '引', kunReadings: ['ひ.く'], frequency: 100 }),
 ];
 
-describe('buildPhoneticLinks', () => {
-  const links = buildPhoneticLinks({ words, kanji: kanjiList });
+describe('buildPhoneticHubs', () => {
+  const result = buildPhoneticHubs({ words, kanji: kanjiList });
 
-  it('links words with an identical reading as homophones, weighted by the partner word tier', () => {
-    expect(links).toContainEqual({
-      fromEntryId: 'w:1',
-      toEntryId: 'w:2',
-      axis: 'phonetic',
-      relation: 'homophone',
-      weight: wordWeightTier(words[1]!), // partner (w:2) tier, N4 -> 0.95
-      source: 'jmdict',
-    });
-    expect(links).toContainEqual({
-      fromEntryId: 'w:2',
-      toEntryId: 'w:1',
-      axis: 'phonetic',
-      relation: 'homophone',
-      weight: wordWeightTier(words[0]!), // partner (w:1) tier, N3 -> 0.9
-      source: 'jmdict',
-    });
+  it('groups words with an identical reading into a reading hub', () => {
+    expect(hubMembers(result, 'h:reading:こう')).toEqual(['w:1', 'w:2', 'w:4']);
   });
 
-  it('includes alternateReadings when matching homophones, still comparing kana as written', () => {
-    // w:4's alternate reading こう pairs it with both w:1 and w:2.
-    expect(links).toContainEqual(
-      expect.objectContaining({ fromEntryId: 'w:1', toEntryId: 'w:4', relation: 'homophone' }),
-    );
-    expect(links).toContainEqual(
-      expect.objectContaining({ fromEntryId: 'w:4', toEntryId: 'w:1', relation: 'homophone' }),
-    );
-    expect(links).toContainEqual(
-      expect.objectContaining({ fromEntryId: 'w:4', toEntryId: 'w:2', relation: 'homophone' }),
-    );
+  it('includes alternateReadings as an extra membership, still comparing kana as written', () => {
+    // w:4's primary reading is そうそう (no hub, only one member) but its
+    // alternate reading こう joins the こう hub above as well - one
+    // membership per distinct reading.
+    const hub = result.hubs.find((h) => h.hubId === 'h:reading:こう');
+    expect(hub?.memberCount).toBe(3);
+    expect(result.members.filter((m) => m.entryId === 'w:4')).toHaveLength(1);
+    expect(result.hubs.some((h) => h.hubId === 'h:reading:そうそう')).toBe(false); // dropped, only one member
   });
 
-  it('does not link words with different readings', () => {
-    expect(links.some((l) => l.relation === 'homophone' && (l.fromEntryId === 'w:3' || l.toEntryId === 'w:3'))).toBe(
-      false,
-    );
+  it('does not create a hub for a reading used by only one word', () => {
+    expect(result.hubs.some((h) => h.hubId === 'h:reading:きょう')).toBe(false);
   });
 
-  it('links kanji sharing an on-reading, weight scaled by the partner kanji frequency rank', () => {
-    expect(links).toContainEqual({
-      fromEntryId: 'k:行',
-      toEntryId: 'k:高',
-      axis: 'phonetic',
-      relation: 'shared_on_reading',
-      weight: frequencyScaledWeight(0.6, 5),
-      source: 'kanjidic2',
-    });
-    // 高 (freq 5) ranks ahead of 校 (freq 20) from 行's perspective, but
-    // both are within the (large) cap so both still appear.
-    expect(links).toContainEqual(
-      expect.objectContaining({
-        fromEntryId: 'k:行',
-        toEntryId: 'k:校',
-        weight: frequencyScaledWeight(0.6, 20),
-      }),
-    );
+  it('groups kanji sharing an on-reading into an on hub, ranked by KANJIDIC2 frequency', () => {
+    expect(hubMembers(result, 'h:on:コウ')).toEqual(['k:校', 'k:行', 'k:高'].sort());
+    const hub = result.hubs.find((h) => h.hubId === 'h:on:コウ');
+    expect(hub?.memberCount).toBe(3);
+    const highRank = result.members.find((m) => m.hubId === 'h:on:コウ' && m.entryId === 'k:高');
+    expect(highRank?.rank).toBe(5);
   });
 
-  it('links kanji sharing a kun-reading base, ignoring the reading after the dot', () => {
-    expect(links).toContainEqual({
-      fromEntryId: 'k:行',
-      toEntryId: 'k:生',
-      axis: 'phonetic',
-      relation: 'shared_kun_reading',
-      weight: frequencyScaledWeight(0.5, 3),
-      source: 'kanjidic2',
-    });
+  it('separates kun-reading hubs that differ only in okurigana (ひ vs ひ.く)', () => {
+    expect(result.hubs.some((h) => h.hubId === 'h:kun:ひ')).toBe(false); // 日 is the only member
+    expect(result.hubs.some((h) => h.hubId === 'h:kun:ひく')).toBe(false); // 引 is the only member
+    // 行 (い.く) and 生 (い.きる) differ after okurigana removal too (いく vs いきる).
+    expect(result.hubs.some((h) => h.hubId === 'h:kun:いく')).toBe(false);
   });
 
-  it('does not link 本, which shares no reading with anything else', () => {
-    expect(links.some((l) => l.fromEntryId === 'k:本' || l.toEntryId === 'k:本')).toBe(false);
+  it('groups kanji sharing a full kun reading (including okurigana) into one kun hub', () => {
+    const moreKanji = [...kanjiList, kanji({ literal: '弾', kunReadings: ['ひ.く'], frequency: 200 })];
+    const withPair = buildPhoneticHubs({ words, kanji: moreKanji });
+    expect(hubMembers(withPair, 'h:kun:ひく')).toEqual(['k:引', 'k:弾']);
+  });
+
+  it('gives every hub member_count equal to its row count', () => {
+    for (const hub of result.hubs) {
+      const rows = result.members.filter((m) => m.hubId === hub.hubId).length;
+      expect(hub.memberCount).toBe(rows);
+    }
+  });
+
+  it('does not create a hub for 本, which shares no reading with anything else', () => {
+    expect(result.members.some((m) => m.entryId === 'k:本')).toBe(false);
   });
 });

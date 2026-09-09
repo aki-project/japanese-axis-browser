@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Kanji, VocabularyItem } from '@japanesesite/shared';
-import { buildStructuralLinks } from './structural.js';
-import { frequencyScaledWeight, wordWeightTier } from './common.js';
+import { buildStructuralHubs, buildStructuralLinks } from './structural.js';
+import { wordWeightTier } from './common.js';
 
 function word(overrides: Partial<VocabularyItem> & { entSeq: number; surface: string; reading: string }): VocabularyItem {
   return {
@@ -87,30 +87,44 @@ describe('buildStructuralLinks', () => {
     });
   });
 
-  it('links kanji sharing a radical, weight scaled by the partner kanji frequency rank', () => {
-    expect(links).toContainEqual({
-      fromEntryId: 'k:木',
-      toEntryId: 'k:林',
-      axis: 'structural',
-      relation: 'shared_radical',
-      weight: frequencyScaledWeight(0.5, 4), // 林's frequency
-      source: 'kradfile',
-    });
-    expect(links).toContainEqual({
-      fromEntryId: 'k:本',
-      toEntryId: 'k:木',
-      axis: 'structural',
-      relation: 'shared_radical',
-      weight: frequencyScaledWeight(0.5, 3), // 木's frequency
-      source: 'kradfile',
-    });
-  });
-
-  it('does not link 山, which shares no radical or component with anything else', () => {
-    expect(links.some((l) => l.fromEntryId === 'k:山' || l.toEntryId === 'k:山')).toBe(false);
-  });
-
   it('never links an entry to itself', () => {
     expect(links.every((l) => l.fromEntryId !== l.toEntryId)).toBe(true);
+  });
+
+  it('carries no shared_radical or shared_phonetic_component links - those are hubs now', () => {
+    expect(links.some((l) => l.relation === 'shared_radical')).toBe(false);
+    expect(links.some((l) => l.relation === 'shared_phonetic_component')).toBe(false);
+  });
+});
+
+describe('buildStructuralHubs', () => {
+  const result = buildStructuralHubs({ kanji: kanjiList });
+
+  it('groups kanji sharing a radical into a radical hub, ranked by KANJIDIC2 frequency', () => {
+    const hub = result.hubs.find((h) => h.hubId === 'h:radical:木');
+    expect(hub?.memberCount).toBe(3);
+    expect(hub?.label).toBe('木');
+    const members = result.members.filter((m) => m.hubId === 'h:radical:木');
+    expect(members.map((m) => m.entryId).sort()).toEqual(['k:本', 'k:木', 'k:林'].sort());
+    const honRank = members.find((m) => m.entryId === 'k:本');
+    expect(honRank?.rank).toBe(2);
+  });
+
+  it('does not create a radical hub for a radical used by only one kanji', () => {
+    expect(result.hubs.some((h) => h.hubId === 'h:radical:日')).toBe(false);
+    expect(result.hubs.some((h) => h.hubId === 'h:radical:山')).toBe(false);
+  });
+
+  it('does not double-count a kanji whose own radical equals its component', () => {
+    // 本's component 木 equals its radical 木, so it must not also appear
+    // as a "shared non-radical component" hub member.
+    expect(result.hubs.some((h) => h.hubId === 'h:component:木')).toBe(false);
+  });
+
+  it('member_count always equals the number of membership rows written for that hub', () => {
+    for (const hub of result.hubs) {
+      const rows = result.members.filter((m) => m.hubId === hub.hubId).length;
+      expect(hub.memberCount).toBe(rows);
+    }
   });
 });

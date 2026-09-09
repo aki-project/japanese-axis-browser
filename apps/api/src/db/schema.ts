@@ -91,6 +91,43 @@ export const sentenceEntries = pgTable(
   ],
 );
 
+/**
+ * A Hub is the shared thing at the centre of a family relation
+ * ("everything that shares an X"): a radical, a component, an on
+ * reading, a kun reading, a word reading, a WordNet synset, or an
+ * English gloss. See CLAUDE.md's "Two storage shapes" and
+ * packages/shared/src/hubs.ts (HUB_KINDS, HUB_KIND_RELATION). Hubs are
+ * not Entries and have no page of their own yet.
+ */
+export const hubs = pgTable('hubs', {
+  hubId: text('hub_id').primaryKey(),
+  kind: text('kind').notNull(),
+  label: text('label').notNull(),
+  memberCount: integer('member_count').notNull(),
+});
+
+/**
+ * An entry's membership in a hub. Siblings of an entry on a family
+ * relation are the other members of its hubs. `rank` is nullable
+ * (lower sorts first; null sorts last) - kanji use KANJIDIC2
+ * frequency, words use a commonness/JLPT tier.
+ */
+export const hubMembers = pgTable(
+  'hub_members',
+  {
+    hubId: text('hub_id').notNull(),
+    entryId: text('entry_id').notNull(),
+    rank: integer('rank'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.hubId, t.entryId] }),
+    // Ordered paging within a hub: members of one hub, by rank then id.
+    index('hub_members_hub_rank_entry_idx').on(t.hubId, t.rank, t.entryId),
+    // Entry-to-hubs lookup: which hubs does this entry belong to.
+    index('hub_members_entry_id_idx').on(t.entryId),
+  ],
+);
+
 export const links = pgTable(
   'links',
   {

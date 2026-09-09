@@ -49,7 +49,7 @@ function weightRank(weight: number | null): number {
 /**
  * Deduplicates on (from, to, axis, relation), keeping the highest
  * weight seen for that key (nulls sort below any number - see
- * `weightRank`, shared with `capPerEntry` so the two never disagree).
+ * `weightRank`).
  */
 export function dedupeLinks(links: Link[]): Link[] {
   const byKey = new Map<string, Link>();
@@ -61,31 +61,6 @@ export function dedupeLinks(links: Link[]): Link[] {
     }
   }
   return [...byKey.values()];
-}
-
-/**
- * Caps the outgoing links for each `from` entry to `limit`, keeping the
- * highest-weight neighbors (ties broken by `to_entry_id` ascending for
- * determinism). Only meant to be applied to a single (axis, relation)
- * slice at a time.
- */
-export function capPerEntry(links: Link[], limit: number): Link[] {
-  const byFrom = new Map<string, Link[]>();
-  for (const link of links) {
-    const arr = byFrom.get(link.fromEntryId) ?? [];
-    arr.push(link);
-    byFrom.set(link.fromEntryId, arr);
-  }
-  const out: Link[] = [];
-  for (const arr of byFrom.values()) {
-    arr.sort((x, y) => {
-      const dw = weightRank(y.weight) - weightRank(x.weight);
-      if (dw !== 0) return dw;
-      return x.toEntryId < y.toEntryId ? -1 : x.toEntryId > y.toEntryId ? 1 : 0;
-    });
-    pushAll(out, arr.slice(0, limit));
-  }
-  return out;
 }
 
 /**
@@ -155,90 +130,24 @@ export function wordWeightTier(word: Pick<VocabularyItem, 'jlptLevel' | 'isCommo
   return word.isCommon ? 0.7 : 0.5;
 }
 
-const FREQUENCY_RANK_CEILING = 2500;
-
 /**
- * Scales a relation's base weight by how frequent the *partner* kanji
- * is: weight = base * (1 - 0.5 * min(rank, 2500) / 2500) when a
- * frequency is known (rank 1 = most frequent -> full base weight, rank
- * >= 2500 -> half base weight), or base * 0.4 when the partner has no
- * recorded frequency at all. Always clamped to [0, 1].
+ * Word hub rank: N5 is the most useful tier to see first, N1 least
+ * (among leveled words); is_common words with no JLPT level sort after
+ * every leveled word, and everything else sorts last. Used for every
+ * word-side hub (reading/homophone, synset/synonym, gloss/shared_sense)
+ * - see CLAUDE.md's rank spec for hubs.
  */
-export function frequencyScaledWeight(base: number, partnerFrequency: number | null): number {
-  const raw =
-    partnerFrequency === null
-      ? base * 0.4
-      : base * (1 - 0.5 * (Math.min(partnerFrequency, FREQUENCY_RANK_CEILING) / FREQUENCY_RANK_CEILING));
-  return Math.min(1, Math.max(0, raw));
-}
+const WORD_HUB_RANK_BY_LEVEL: Partial<Record<JlptLevel, number>> = {
+  N5: 0,
+  N4: 100,
+  N3: 200,
+  N2: 300,
+  N1: 400,
+};
 
-/**
- * Builds links for a "members share this key" grouping (e.g. kanji
- * sharing an on-reading, or sharing a radical). A member can appear in
- * more than one group for the same relation (a kanji can have several
- * on-readings, each its own group), so the cap has to be applied once
- * per member across every group it took part in, not per group -
- * otherwise a kanji with three on-readings could end up with 3x `cap`
- * outgoing links. `rank` is ascending: lower is kept (e.g. KANJIDIC2
- * frequency, where a smaller number means a more frequent kanji);
- * members with no rank sort last, and the same value also drives each
- * link's weight via `frequencyScaledWeight(baseWeight, rank(partner))`.
- * Ties break on the partner's entry ID for determinism. The relation is
- * emitted in one direction per pick, so the overall edge set need not
- * be perfectly symmetric once capped - `symmetrizeLinks` fixes that up
- * afterwards.
- */
-export function buildCappedGroupLinks(
-  groups: Iterable<string[]>,
-  toEntryId: (member: string) => EntryId,
-  rank: (member: string) => number | null,
-  cap: number,
-  axis: Link['axis'],
-  relation: Relation,
-  baseWeight: number,
-  source: string,
-): Link[] {
-  // Phase 1: every (member, partner) pair from every group, deduplicated
-  // per member (the same two kanji can share more than one on-reading).
-  const partnersByMember = new Map<string, Set<string>>();
-  for (const members of groups) {
-    if (members.length < 2) continue;
-    for (const member of members) {
-      const set = partnersByMember.get(member) ?? new Set<string>();
-      for (const partner of members) {
-        if (partner !== member) set.add(partner);
-      }
-      partnersByMember.set(member, set);
-    }
+export function wordHubRank(word: Pick<VocabularyItem, 'jlptLevel' | 'isCommon'>): number {
+  if (word.jlptLevel && word.jlptLevel in WORD_HUB_RANK_BY_LEVEL) {
+    return WORD_HUB_RANK_BY_LEVEL[word.jlptLevel] as number;
   }
-
-  // Phase 2: cap each member's partner set to `cap`, ranked ascending
-  // (most frequent first), ties broken by entry ID.
-  const out: Link[] = [];
-  for (const [member, partners] of partnersByMember) {
-    const from = toEntryId(member);
-    const ranked = [...partners].sort((a, b) => {
-      const ra = rank(a);
-      const rb = rank(b);
-      if (ra !== rb) {
-        if (ra === null) return 1;
-        if (rb === null) return -1;
-        return ra - rb;
-      }
-      const ea = toEntryId(a);
-      const eb = toEntryId(b);
-      return ea < eb ? -1 : ea > eb ? 1 : 0;
-    });
-    for (const partner of ranked.slice(0, cap)) {
-      out.push({
-        fromEntryId: from,
-        toEntryId: toEntryId(partner),
-        axis,
-        relation,
-        weight: frequencyScaledWeight(baseWeight, rank(partner)),
-        source,
-      });
-    }
-  }
-  return out;
+  return word.isCommon ? 700 : 1500;
 }
