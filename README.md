@@ -1,6 +1,7 @@
 # Japanese Learning Site
 
-One page, one entry, three axes. See `CLAUDE.md` for the full specification.
+One page, one entry, three axes. See `CLAUDE.md` for the full specification and
+`DECISIONS.md` for why it is built this way.
 
 ## Quick start
 
