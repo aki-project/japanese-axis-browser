@@ -1,0 +1,35 @@
+{
+  "name": "pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "download": "tsx src/stages/download.ts",
+    "parse": "tsx src/stages/parse.ts",
+    "transform": "tsx src/stages/transform.ts",
+    "link": "tsx src/stages/link.ts",
+    "validate": "tsx src/stages/validate.ts",
+    "load": "tsx src/stages/load.ts",
+    "seed:build": "tsx src/stages/seed.ts",
+    "seed": "tsx src/stages/seed.ts && tsx src/stages/validate.ts --dir=seed && tsx src/stages/load.ts --dir=seed",
+    "sentences": "tsx src/stages/sentences.ts",
+    "check": "tsx src/stages/check.ts",
+    "all": "pnpm run download && pnpm run parse && pnpm run transform && pnpm run link && pnpm run validate && pnpm run load && pnpm run sentences && pnpm run check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@japanesesite/shared": "workspace:*",
+    "api": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "zod": "4.5.4",
+    "sax": "1.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@types/sax": "1.2.7",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# builds
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# data
+data/raw/
+data/processed/
+*.sqlite
+*.db
+
+# logs and OS
+*.log
+.DS_Store
+
+# editors
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# claude local settings
+.claude/settings.local.json
+
+# embedded dev database
+data/pglite/
