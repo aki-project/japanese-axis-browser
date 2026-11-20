@@ -36,7 +36,10 @@ function AccountForm({ mode, onDone }: { mode: FormMode; onDone: () => void }) {
     <form
       onSubmit={handleSubmit}
       aria-label={mode === 'login' ? 'Log in' : 'Register'}
-      className="absolute right-0 z-20 mt-1 flex w-72 flex-col gap-2 rounded border border-slate-200 bg-white p-3 text-sm shadow-lg"
+      // Positioned against the header (its nearest positioned ancestor),
+      // not the buttons: when the header wraps on a narrow screen the
+      // buttons sit at the left, and a box aligned to them ran off-screen.
+      className="absolute top-full right-4 z-20 mt-1 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 rounded border border-slate-200 bg-white p-3 text-sm shadow-lg"
     >
       <label htmlFor={`${id}-user`} className="text-xs font-medium text-slate-600">
         Username
@@ -157,7 +160,7 @@ export function AccountBar() {
   }
 
   return (
-    <div className="relative flex items-center gap-2">
+    <div className="flex items-center gap-2">
       <button
         type="button"
         aria-expanded={mode === 'login'}
