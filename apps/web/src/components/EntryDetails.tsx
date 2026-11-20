@@ -1,11 +1,15 @@
 import type { EntryResponse, Kanji, VocabularyItem } from '@japanesesite/shared';
+import { useKnownEntries } from '../hooks/useKnownEntries.js';
 import { JlptBadge } from './JlptBadge.js';
+import { KnownCheckbox } from './KnownCheckbox.js';
 import { SentenceList } from './SentenceList.js';
 
-function KanjiDetails({ kanji }: { kanji: Kanji }) {
+const KNOWN_HEADLINE = ' text-blue-700';
+
+function KanjiDetails({ kanji, isKnown }: { kanji: Kanji; isKnown: boolean }) {
   return (
     <>
-      <p lang="ja" className="text-7xl leading-none">
+      <p lang="ja" className={`text-7xl leading-none${isKnown ? KNOWN_HEADLINE : ''}`}>
         {kanji.literal}
       </p>
       <JlptBadge level={kanji.jlptLevel} />
@@ -30,10 +34,10 @@ function KanjiDetails({ kanji }: { kanji: Kanji }) {
   );
 }
 
-function WordDetails({ word }: { word: VocabularyItem }) {
+function WordDetails({ word, isKnown }: { word: VocabularyItem; isKnown: boolean }) {
   return (
     <>
-      <p lang="ja" className="text-5xl leading-tight">
+      <p lang="ja" className={`text-5xl leading-tight${isKnown ? KNOWN_HEADLINE : ''}`}>
         {word.surface}
       </p>
       <p lang="ja" className="text-xl text-slate-500">
@@ -66,9 +70,22 @@ function WordDetails({ word }: { word: VocabularyItem }) {
 }
 
 export function EntryDetails({ entry }: { entry: EntryResponse }) {
+  const known = useKnownEntries();
+  const isKnown = known.isKnown(entry.entryId);
+  const surface = entry.kind === 'kanji' ? entry.kanji.literal : entry.word.surface;
   return (
     <article className="flex w-full flex-col items-center gap-3 text-center">
-      {entry.kind === 'kanji' ? <KanjiDetails kanji={entry.kanji} /> : <WordDetails word={entry.word} />}
+      {entry.kind === 'kanji' ? (
+        <KanjiDetails kanji={entry.kanji} isKnown={isKnown} />
+      ) : (
+        <WordDetails word={entry.word} isKnown={isKnown} />
+      )}
+      {known.status !== 'inactive' ? (
+        <label className="flex items-center gap-2 text-sm text-slate-600">
+          <KnownCheckbox entryId={entry.entryId} label={surface} />
+          Known
+        </label>
+      ) : null}
       <SentenceList sentences={entry.sentences} />
     </article>
   );

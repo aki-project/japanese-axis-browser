@@ -7,12 +7,15 @@ import {
   primaryKey,
   real,
   text,
+  timestamp,
 } from 'drizzle-orm/pg-core';
+import type { KnownCollections } from '@japanesesite/shared';
 
 /**
- * Content tables loaded by the pipeline. Nothing is written at request
- * time by the API. Column names and types are chosen to round-trip
- * exactly to the zod schemas in packages/shared/src/schemas.ts.
+ * Content tables loaded by the pipeline. The API never writes to them.
+ * Column names and types are chosen to round-trip exactly to the zod
+ * schemas in packages/shared/src/schemas.ts. The account tables at the
+ * end of this file are the only ones written at request time.
  */
 
 export const kanji = pgTable(
@@ -143,3 +146,40 @@ export const links = pgTable(
     index('links_from_entry_axis_idx').on(t.fromEntryId, t.axis),
   ],
 );
+
+// ---- Account tables: written by the API, never by the pipeline ----
+
+export const users = pgTable('users', {
+  userId: integer('user_id').primaryKey().generatedAlwaysAsIdentity(),
+  // Stored lower-cased, so usernames are unique case-insensitively.
+  username: text('username').notNull().unique(),
+  // scrypt hash; see apps/api/src/services/password.ts for the format.
+  passwordHash: text('password_hash').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+});
+
+/** A logged-in session. Only the SHA-256 of the cookie's token is stored. */
+export const sessions = pgTable(
+  'sessions',
+  {
+    tokenHash: text('token_hash').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.userId, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('sessions_expires_at_idx').on(t.expiresAt)],
+);
+
+/** One blob per user: the known-kanji and known-vocab collections, saved and loaded whole. */
+export const userCollections = pgTable('user_collections', {
+  userId: integer('user_id')
+    .primaryKey()
+    .references(() => users.userId, { onDelete: 'cascade' }),
+  data: jsonb('data').notNull().$type<KnownCollections>(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  // Optimistic-concurrency counter: a save names the version it was based on.
+  version: integer('version').notNull().default(1),
+});

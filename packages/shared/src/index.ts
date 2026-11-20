@@ -3,3 +3,4 @@ export * from './entryId.js';
 export * from './schemas.js';
 export * from './searchKey.js';
 export * from './hubs.js';
+export * from './account.js';

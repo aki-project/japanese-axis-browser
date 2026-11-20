@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiClientError, getEntry, getLinks, searchEntries } from './client.js';
+import {
+  ApiClientError,
+  getEntry,
+  getLinks,
+  login,
+  saveCollections,
+  searchEntries,
+} from './client.js';
 
 function jsonResponse(body: unknown, init?: { status?: number; ok?: boolean }): Response {
   const status = init?.status ?? 200;
@@ -91,5 +98,44 @@ describe('api client', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(ApiClientError);
     }
+  });
+
+  it('sends login and collection saves as JSON bodies', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ user: { username: 'aki' } }))
+      .mockResolvedValueOnce(
+        jsonResponse({ collections: { kanji: ['k:日'], vocab: [] }, updatedAt: null, version: 1 }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await login({ username: 'aki', password: 'secretpass' });
+    await saveCollections({ username: 'aki', version: 0, collections: { kanji: ['k:日'], vocab: [] } });
+
+    const [loginCall, saveCall] = fetchMock.mock.calls as unknown as [
+      [string, RequestInit],
+      [string, RequestInit],
+    ];
+    expect(loginCall[0]).toBe('/api/auth/login');
+    expect(loginCall[1].method).toBe('POST');
+    expect(JSON.parse(String(loginCall[1].body))).toEqual({ username: 'aki', password: 'secretpass' });
+    expect(saveCall[0]).toBe('/api/collections');
+    expect(saveCall[1].method).toBe('PUT');
+  });
+
+  it('surfaces a 401 from login as an ApiClientError with the server code', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          { error: { code: 'INVALID_CREDENTIALS', message: 'Wrong username or password.' } },
+          { status: 401 },
+        ),
+      ),
+    );
+    await expect(login({ username: 'aki', password: 'nope' })).rejects.toMatchObject({
+      status: 401,
+      code: 'INVALID_CREDENTIALS',
+    });
   });
 });

@@ -1,6 +1,6 @@
 # Japanese Learning Site
 
-A web application for exploring Japanese as a linguistic web. At any moment the page is centred on a single active **Entry**, a kanji or a word. The learner moves through the language by following links from that entry to related entries, choosing which **axis** to travel along. There is nothing else: no lessons, decks, reviews, quizzes, or accounts. The whole site is the web and the page that shows one node of it.
+A web application for exploring Japanese as a linguistic web. At any moment the page is centred on a single active **Entry**, a kanji or a word. The learner moves through the language by following links from that entry to related entries, choosing which **axis** to travel along. There is nothing else: no lessons, decks, reviews, or quizzes. The whole site is the web and the page that shows one node of it. Optional accounts exist only so a learner can mark entries as known.
 
 ## Core concept
 
@@ -11,7 +11,7 @@ A web application for exploring Japanese as a linguistic web. At any moment the 
   - **Structural** - kanji composition and etymology: a word to the kanji it contains, a kanji to its components and radicals, kanji sharing a radical or phonetic component. Source: KRADFILE, RADKFILE, and a component decomposition dataset.
 - **Navigation is the product.** Following a link replaces the active entry and pushes the previous one onto a trail. The trail is visible, and the learner can step back along it. The URL always identifies the active entry so any position in the web is shareable and reloadable.
 - **Axis filtering.** The learner can show one axis, several, or all. The chosen axes persist across navigation until changed.
-- **No user state.** The site is anonymous and read-only. There are no accounts and no user-specific tables. The only per-viewer state is axis visibility, kept in local storage.
+- **Content is anonymous.** Content routes are read-only, public, and identical for every viewer. Axis visibility and the JLPT filter are kept in local storage. The only server-side user state is an account and its known-entry collections (see Accounts).
 - Relationships are content, computed by the pipeline and stored, not inferred at request time. The API serves them; the frontend never derives relationships itself.
 - **Two storage shapes.** A *pairwise* relation (A relates to B and to nothing else by that fact) is a row in `links`. A *family* relation ("everything that shares an X") is a **Hub** plus its memberships, and the API materializes siblings from it. Never store a family as pairwise edges: a family of k members costs k(k-1) rows and forces per-entry caps that hide members.
 
@@ -21,7 +21,7 @@ Decided. Do not propose alternatives unless asked.
 
 - **Language:** TypeScript end to end, strict mode, Node 22 LTS.
 - **Monorepo:** pnpm workspaces.
-- **Backend:** Fastify, Drizzle ORM, PostgreSQL 16, zod for validation. No authentication.
+- **Backend:** Fastify, Drizzle ORM, PostgreSQL 16, zod for validation. Username and password accounts with scrypt hashes (`node:crypto`) and an HttpOnly session cookie; no auth library.
 - **Frontend:** React 19 with Vite, React Router, TanStack Query for server state, Tailwind CSS, Vitest and Testing Library.
 - **Shared types:** a `packages/shared` workspace exporting zod schemas and inferred TypeScript types. Both sides import from it. It is the API contract.
 - **Data pipeline:** TypeScript scripts under `packages/pipeline`, run with `tsx`. Raw sources are gitignored. Processed output is JSON Lines.
@@ -78,11 +78,19 @@ Entity names are fixed. Use them in code, tables, and API paths.
 - **Kanji** - character, on and kun readings, meanings, stroke count, radical, component parts, etymology note, JLPT level, `frequency` (KANJIDIC2 rank, used by the pipeline to cap fan-out on shared-reading and shared-radical links). Source ID is the literal.
 - **Sentence** - Japanese text, English translation, aligned furigana segments, Tatoeba ID and licence. Shown on an entry page as examples; not itself an Entry. **Deferred:** the Tatoeba download and sentence stage are left out of the first build. The table, schema, and frontend section stay; the pipeline stage is a skipped stub until enabled.
 
-All tables are content tables, loaded by the pipeline. Nothing is written at request time.
+Content tables are loaded by the pipeline and never written by the API. The account tables below are the only ones written at request time, and the pipeline never touches them.
 
-### Future user customization
+### Accounts
 
-Not built now. When it is added, the only per-user data will be a learned or unlearned status per entry: one table keyed on `(user_id, entry_id)` with a `learned_at` timestamp. No decks, review schedules, scores, or progress aggregates. Do not add columns or tables in anticipation of it.
+- **User** - `users(user_id, username, password_hash, created_at, last_login_at)`. Usernames are stored lower-cased and unique. Passwords are scrypt-hashed in `apps/api/src/services/password.ts`; never store or log a plain password.
+- **Session** - `sessions(token_hash, user_id, created_at, expires_at)`. The cookie `jl_session` carries a random token (HttpOnly, SameSite=Lax, Secure in production, 30 days); only its SHA-256 is stored.
+- **Known collections** - `user_collections(user_id, data, updated_at, version)`: one JSON blob per user, `{ kanji: k:… entry IDs, vocab: w:… entry IDs }`, saved and loaded whole. The client holds it as an in-memory table and edits it there. It is saved only when the learner presses Save, never automatically, because the blob can be large. Logging out with unsaved changes asks before discarding them.
+- **Saves are conditional.** A PUT names the `username` and the `version` it was based on. The server answers 409 `SESSION_CHANGED` if the session now belongs to someone else and 409 `COLLECTIONS_CONFLICT` if the version moved on. On a conflict the client reloads the blob and replays its unsaved edits on top. Never make a save unconditional.
+- Account writes accept `application/json` only (415 otherwise), so a cross-site form cannot reach them.
+- **Rate limits are global**, one server-wide budget per action, not per client: login 60/min, register 10/min, save 30/min (`DEFAULT_RATE_LIMITS` in `apps/api/src/routes/account.ts`). Over the limit is 429 `RATE_LIMITED` with `Retry-After`. Failed logins count; only logged-in saves count. The budgets are in memory, per API process.
+- **Registration** requires today's date written with the Japanese era (e.g. 令和8年11月19日), accepted within one day of the UTC date.
+- Known state is applied on the client. Content responses never vary by user, so they stay cacheable.
+- No decks, review schedules, scores, or progress aggregates.
 
 ## Rules that apply everywhere
 
@@ -96,7 +104,8 @@ Not built now. When it is added, the only per-user data will be a learned or unl
 
 ### API contract
 - Schemas in `packages/shared` are the single source of truth. Change the schema first, then the server, then the client.
-- REST paths: `/api/entries/:entryId`, `/api/entries/:entryId/links?axis=semantic,phonetic,structural`, `/api/entries/search?q=`. All routes are GET and public.
+- REST paths: `/api/entries/:entryId`, `/api/entries/:entryId/links?axis=semantic,phonetic,structural`, `/api/entries/search?q=`. Content routes are GET and public.
+- Account paths: `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`, `GET` and `PUT /api/collections` (401 without a session). Account responses send `Cache-Control: no-store`.
 - `/api/entries/:entryId` returns the full entry plus a summary count of links per axis so the page can render axis controls before links load.
 - Links are returned grouped by axis, then by relation, ordered by weight descending. Link lists are paginated per axis, and each page is split evenly between the axis's relations that still have links (`limit / K` each for K such relations; a relation's unused share goes to the others), so every relation appears on the first page. The cursor carries a position per relation.
 - The links endpoint takes an optional `jlpt` filter (comma-separated JLPT levels and `none`). It is applied in SQL before paging and in `total`, so every page but the last is full. The entry endpoint's per-axis counts are never filtered.
@@ -132,6 +141,7 @@ Not built now. When it is added, the only per-user data will be a learned or unl
 - The entry page is the home route. Route is `/e/:entryId`. The active entry is centred; links are arranged around it grouped by axis, with each axis visually distinct by more than colour alone.
 - Following a link is a client-side route change. The trail is kept in client state and mirrored in history so the browser back button steps back one entry.
 - Axis visibility lives in local storage, wrapped in try/catch, defaulting to all axes on. It survives navigation and reload.
+- When logged in, every entry (the active one and every linked one) has a "known" checkbox, and known entries are shown in blue. The checkbox is the non-colour signal. Checkboxes stay disabled until the saved collections have loaded, so a partial table is never saved over them.
 - Entry page is keyboard-navigable: Tab moves between links, Enter follows, Backspace or `[` steps back along the trail, `S` `P` `K` toggle the semantic, phonetic, and structural axes.
 - Colour is never the only signal for which axis a link belongs to.
 
@@ -158,3 +168,4 @@ Known gaps and decisions deferred at the end of the first build (2026-09-08). No
 - **Version pins.** TypeScript 5.9, Vite 7, Vitest 4, and React Router 7 were pinned deliberately below the newest majors. Upgrade one at a time when wanted.
 - **Sentences.** Tatoeba download, the sentence stage, and the furigana segmenter are stubbed. The tables and frontend section exist and are empty.
 - **Local database.** This machine now runs the Docker Compose Postgres on host port 5433, because the system Postgres holds 5432; `.env` sets `POSTGRES_PORT` and `DATABASE_URL` accordingly. The full dataset is loaded into it. The api `dev`/`db:migrate` and pipeline `load`/`seed`/`check` scripts load `.env` with `--env-file-if-exists`; tests do not. Without `DATABASE_URL` everything falls back to PGlite in `data/pglite/` (one process at a time).
+- **Account hardening (2026-11-19).** The rate limits are global, so one client hammering login can lock every learner out of logging in for the rest of the minute; add a per-IP limit in front if that becomes a problem. CORS still reflects any origin with `credentials` off, which is safe today; restrict `origin` to the site's own origin if credentials are ever enabled. The era-date field accepts Arabic and full-width digits but not kanji numerals (令和八年).

@@ -15,6 +15,20 @@
       "when": 1788929309381,
       "tag": "0001_tidy_morg",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795145643059,
+      "tag": "0002_black_nighthawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795146287143,
+      "tag": "0003_fat_rachel_grey",
+      "breakpoints": true
     }
   ]
 }

@@ -2,13 +2,21 @@ import cors from '@fastify/cors';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
 import type { Db } from './db/client.js';
+import { registerAccountRoutes, type AccountRouteOptions } from './routes/account.js';
 import { registerEntryRoutes } from './routes/entries.js';
 import { registerHealthRoute } from './routes/health.js';
 
 export interface BuildAppOptions {
   db: Db;
-  /** Long-lived Cache-Control in production; no-cache otherwise. Defaults to false. */
+  /**
+   * Long-lived Cache-Control on content and a Secure session cookie in
+   * production; no-cache and a plain cookie otherwise. Defaults to false.
+   */
   production?: boolean;
+  /** Clock for the registration date check; injectable for tests. */
+  now?: () => Date;
+  /** Overrides for the global account rate limits; injectable for tests. */
+  rateLimits?: AccountRouteOptions['rateLimits'];
 }
 
 function errorShape(code: string, message: string): { error: { code: string; message: string } } {
@@ -18,7 +26,10 @@ function errorShape(code: string, message: string): { error: { code: string; mes
 /** Maps an HTTP status code to a stable error code for thrown errors. */
 function codeForStatus(statusCode: number): string {
   if (statusCode === 400) return 'VALIDATION_ERROR';
+  if (statusCode === 401) return 'UNAUTHENTICATED';
   if (statusCode === 404) return 'NOT_FOUND';
+  if (statusCode === 413) return 'PAYLOAD_TOO_LARGE';
+  if (statusCode === 429) return 'RATE_LIMITED';
   if (statusCode === 409) return 'CONFLICT';
   if (statusCode >= 400 && statusCode < 500) return 'BAD_REQUEST';
   return 'INTERNAL_ERROR';
@@ -48,6 +59,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     async (instance) => {
       await registerHealthRoute(instance);
       await registerEntryRoutes(instance, options.db, { production: options.production ?? false });
+      // Its own plugin scope, so its no-store hook never touches the
+      // cacheable content routes.
+      await instance.register(async (account) => {
+        await registerAccountRoutes(account, options.db, {
+          production: options.production ?? false,
+          ...(options.now && { now: options.now }),
+          ...(options.rateLimits && { rateLimits: options.rateLimits }),
+        });
+      });
     },
     { prefix: '/api' },
   );

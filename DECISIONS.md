@@ -30,9 +30,16 @@ collapsing the two into one "related" list would destroy that distinction.
 and the browser back button steps back one entry. This is why the trail is
 reconciled against browser history rather than kept as a private stack.
 
-**No user state.** The site is anonymous and read-only. Nothing is written at
-request time; every row comes from the pipeline. If per-user state is ever
-added, the plan is a single learned/unlearned flag per entry and nothing more.
+**Content is anonymous; accounts hold only "known" collections.** The content
+API is read-only and every content row comes from the pipeline. Accounts were
+added on 2026-11-19 for one purpose: a learner marks kanji and words as known,
+and known entries show in blue. The earlier plan was one `(user_id, entry_id,
+learned_at)` row per known entry; it was replaced by one JSON blob per user
+holding the known-kanji and known-vocab sets, because the client keeps the whole
+table in memory and saves it whole, so a blob matches how it is used. Known
+state is applied on the client, so content responses stay public and cacheable.
+Registration asks for today's date written with the Japanese era (±1 day for
+time zones) as a small gate that a learner of Japanese can pass.
 
 ---
 

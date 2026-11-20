@@ -6,17 +6,21 @@ export interface KeyboardNavHandlers {
   onToggleAxis: (axis: Axis) => void;
 }
 
+/** Input types that take no typed text, so the shortcuts stay active on them. */
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset']);
+
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  const tag = target.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+  if (target instanceof HTMLInputElement) return !NON_TEXT_INPUTS.has(target.type);
+  return target.tagName === 'TEXTAREA' || target.isContentEditable;
 }
 
 /**
  * Entry-page keyboard bindings: Backspace/`[` steps back along the trail,
  * `S`/`P`/`K` toggle the semantic/phonetic/structural axes. Tab and Enter
  * are left to native browser/anchor behaviour. Inactive while focus is in
- * an input, textarea, or contenteditable element.
+ * a text input, textarea, or contenteditable element; a focused checkbox
+ * (the known-entry toggles) keeps them active.
  */
 export function useKeyboardNav({ onBack, onToggleAxis }: KeyboardNavHandlers): void {
   useEffect(() => {

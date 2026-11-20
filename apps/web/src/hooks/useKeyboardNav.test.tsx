@@ -10,7 +10,12 @@ function Harness({
   onToggleAxis: (axis: 'semantic' | 'phonetic' | 'structural') => void;
 }) {
   useKeyboardNav({ onBack, onToggleAxis });
-  return <input aria-label="search" />;
+  return (
+    <>
+      <input aria-label="search" />
+      <input type="checkbox" aria-label="known" />
+    </>
+  );
 }
 
 describe('useKeyboardNav', () => {
@@ -51,5 +56,18 @@ describe('useKeyboardNav', () => {
 
     expect(onBack).not.toHaveBeenCalled();
     expect(onToggleAxis).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bindings active while a checkbox has focus', () => {
+    const onBack = vi.fn();
+    const onToggleAxis = vi.fn();
+    render(<Harness onBack={onBack} onToggleAxis={onToggleAxis} />);
+
+    const checkbox = screen.getByLabelText('known');
+    fireEvent.keyDown(checkbox, { key: '[' });
+    fireEvent.keyDown(checkbox, { key: 's' });
+
+    expect(onBack).toHaveBeenCalledTimes(1);
+    expect(onToggleAxis).toHaveBeenCalledWith('semantic');
   });
 });

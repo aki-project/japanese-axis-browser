@@ -2,6 +2,7 @@ import type { Axis } from '@japanesesite/shared';
 import type { FlattenedAxisLinks } from '../hooks/useLinks.js';
 import { AXIS_META, relationLabel } from './axisMeta.js';
 import { EntryLink } from './EntryLink.js';
+import { KnownCheckbox } from './KnownCheckbox.js';
 
 export interface AxisPanelProps {
   axis: Axis;
@@ -115,11 +116,15 @@ export function AxisPanel({
               </h3>
               <ul className="flex flex-col">
                 {relationGroup.entries.map((linked) => (
-                  <li key={linked.entry.entryId}>
-                    <EntryLink
-                      entry={linked.entry}
-                      {...(axis === 'phonetic' && { sharedReadings: linked.via })}
-                    />
+                  <li key={linked.entry.entryId} className="flex items-center gap-1">
+                    <KnownCheckbox entryId={linked.entry.entryId} label={linked.entry.surface} />
+                    <div className="min-w-0 flex-1">
+                      <EntryLink
+                        entry={linked.entry}
+                        showKnownMark={false}
+                        {...(axis === 'phonetic' && { sharedReadings: linked.via })}
+                      />
+                    </div>
                   </li>
                 ))}
               </ul>

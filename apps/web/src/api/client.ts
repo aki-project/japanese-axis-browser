@@ -1,13 +1,20 @@
 import {
   apiErrorSchema,
+  collectionsResponseSchema,
   entryResponseSchema,
   linksResponseSchema,
   searchResponseSchema,
+  sessionResponseSchema,
   type Axis,
+  type CollectionsResponse,
   type EntryResponse,
   type JlptFilterKey,
   type LinksResponse,
+  type LoginRequest,
+  type RegisterRequest,
+  type SaveCollectionsRequest,
   type SearchResponse,
+  type SessionResponse,
 } from '@japanesesite/shared';
 
 /**
@@ -44,9 +51,23 @@ async function parseErrorResponse(res: Response): Promise<never> {
 }
 
 async function getJson(url: string): Promise<unknown> {
+  return requestJson(url);
+}
+
+/** Same-origin request, so the session cookie is sent; JSON in and out. */
+async function requestJson(
+  url: string,
+  init?: { method: 'POST' | 'PUT'; body: unknown },
+): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(url);
+    res = init
+      ? await fetch(url, {
+          method: init.method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(init.body),
+        })
+      : await fetch(url);
   } catch {
     throw new ApiClientError(0, 'network_error', 'Could not reach the server.');
   }
@@ -90,4 +111,35 @@ export async function searchEntries(query: string, limit?: number): Promise<Sear
   if (limit !== undefined) params.set('limit', String(limit));
   const body = await getJson(`/api/entries/search?${params.toString()}`);
   return searchResponseSchema.parse(body);
+}
+
+// ---- Account and collections ----
+
+export async function getSession(): Promise<SessionResponse> {
+  return sessionResponseSchema.parse(await getJson('/api/auth/session'));
+}
+
+export async function register(request: RegisterRequest): Promise<SessionResponse> {
+  const body = await requestJson('/api/auth/register', { method: 'POST', body: request });
+  return sessionResponseSchema.parse(body);
+}
+
+export async function login(request: LoginRequest): Promise<SessionResponse> {
+  const body = await requestJson('/api/auth/login', { method: 'POST', body: request });
+  return sessionResponseSchema.parse(body);
+}
+
+export async function logout(): Promise<SessionResponse> {
+  const body = await requestJson('/api/auth/logout', { method: 'POST', body: {} });
+  return sessionResponseSchema.parse(body);
+}
+
+export async function getCollections(): Promise<CollectionsResponse> {
+  return collectionsResponseSchema.parse(await getJson('/api/collections'));
+}
+
+/** Rejects with a 409 ApiClientError if the stored version or the session's user has changed. */
+export async function saveCollections(request: SaveCollectionsRequest): Promise<CollectionsResponse> {
+  const body = await requestJson('/api/collections', { method: 'PUT', body: request });
+  return collectionsResponseSchema.parse(body);
 }
