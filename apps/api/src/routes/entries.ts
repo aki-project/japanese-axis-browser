@@ -27,7 +27,15 @@ import {
 import { decodeCursor } from '../services/cursor.js';
 import { groupLinks, type FlatLinkRow } from '../services/groupLinks.js';
 
-const CACHE_CONTROL = 'public, max-age=86400';
+// Content changes only when the pipeline reloads, so production lets
+// clients cache for a day. Outside production a reload must show up
+// immediately, so clients revalidate every time.
+const PRODUCTION_CACHE_CONTROL = 'public, max-age=86400';
+const DEVELOPMENT_CACHE_CONTROL = 'no-cache';
+
+export interface EntryRouteOptions {
+  production: boolean;
+}
 
 const INVALID_ENTRY_ID_ERROR = {
   error: {
@@ -55,7 +63,13 @@ function parseRequestedEntryId(
   return { entryId: raw as EntryId, kind: parsed.kind, key: parsed.key };
 }
 
-export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise<void> {
+export async function registerEntryRoutes(
+  app: FastifyInstance,
+  db: Db,
+  options: EntryRouteOptions,
+): Promise<void> {
+  const cacheControl = options.production ? PRODUCTION_CACHE_CONTROL : DEVELOPMENT_CACHE_CONTROL;
+
   // Registered before /:entryId so "search" is never mistaken for an entry ID.
   app.get('/entries/search', async (request, reply) => {
     const parsedQuery = searchQuerySchema.safeParse(request.query);
@@ -69,7 +83,7 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
     const results = await searchEntries(db, folded, q.trim(), limit);
 
     const body = searchResponseSchema.parse({ query: q, results });
-    reply.header('Cache-Control', CACHE_CONTROL);
+    reply.header('Cache-Control', cacheControl);
     return body;
   });
 
@@ -97,7 +111,7 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
         : { kind: 'word', entryId, word: found.row, sentences, linkCounts };
 
     const body = entryResponseSchema.parse(raw);
-    reply.header('Cache-Control', CACHE_CONTROL);
+    reply.header('Cache-Control', cacheControl);
     return body;
   });
 
@@ -118,7 +132,7 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
         error: { code: 'VALIDATION_ERROR', message: queryResult.error.message },
       });
     }
-    const { axis, limit, cursor } = queryResult.data;
+    const { axis, limit, cursor, jlpt } = queryResult.data;
 
     // A cursor is an opaque token round-tripped from a previous
     // response: if it doesn't decode, it's a client error, not "start
@@ -140,7 +154,13 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
     // hub, so there is no cap to page around. Family (hub-derived)
     // relations are the opposite: a hub can have 500+ members, so each
     // one is fetched as its own cursor-scoped, LIMIT-bound page (see
-    // getHubSiblingRows) rather than materialized in full here.
+    // getHubSiblingRows) rather than materialized in full here, resuming
+    // from that relation's own position in the cursor. Each fetches
+    // limit + 1 rows: groupLinks splits the page between relations, and
+    // one relation may take all of it when the others are empty, while
+    // the extra row tells it whether anything follows. Both kinds
+    // apply the optional JLPT filter in SQL, as getLinkCounts does, so
+    // every page but the last is exactly `limit` long.
     const familyRowsByAxis = await Promise.all(
       axis.map((a) => {
         const familyRelations = (RELATIONS_BY_AXIS[a] as readonly Relation[]).filter(
@@ -152,13 +172,20 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
         const cursorForAxis = decodedCursor && decodedCursor.axis === a ? decodedCursor : null;
         return Promise.all(
           familyRelations.map((relation) =>
-            getHubSiblingRows(db, entryId, relation, cursorForAxis, limit),
+            getHubSiblingRows(
+              db,
+              entryId,
+              relation,
+              cursorForAxis?.after[relation] ?? null,
+              limit + 1,
+              jlpt,
+            ),
           ),
         );
       }),
     );
 
-    const pairwiseRows = await getLinkRowsForAxes(db, entryId, axis);
+    const pairwiseRows = await getLinkRowsForAxes(db, entryId, axis, jlpt);
     const rows: FlatLinkRow[] = [...pairwiseRows, ...familyRowsByAxis.flat(2)];
 
     const [summaries, linkCounts] = await Promise.all([
@@ -166,7 +193,7 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
         db,
         rows.map((r) => r.toEntryId),
       ),
-      getLinkCounts(db, entryId),
+      getLinkCounts(db, entryId, jlpt),
     ]);
 
     const totals: Partial<Record<Axis, number>> = {
@@ -177,7 +204,7 @@ export async function registerEntryRoutes(app: FastifyInstance, db: Db): Promise
     const axes = groupLinks({ rows, summaries, axes: axis, limit, cursor, totals });
 
     const body = linksResponseSchema.parse({ entryId, axes });
-    reply.header('Cache-Control', CACHE_CONTROL);
+    reply.header('Cache-Control', cacheControl);
     return body;
   });
 }

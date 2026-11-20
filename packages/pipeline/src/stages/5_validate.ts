@@ -14,7 +14,7 @@
  * OR belongs to a hub (hubs.jsonl only ever contains hubs with two or
  * more members, since buildHubs already dropped smaller ones).
  *
- * Usage: tsx src/stages/validate.ts [--dir=processed|seed]
+ * Usage: tsx src/stages/5_validate.ts [--dir=processed|seed]
  */
 import {
   kanjiSchema,

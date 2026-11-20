@@ -12,7 +12,7 @@ export interface JlptIndex {
 }
 
 /** Builds the JLPT lookup index once from every jlpt-word-list row. Earlier
- * levels (processed N5 first) win on a tie, since parse.ts writes rows in
+ * levels (processed N5 first) win on a tie, since 2_parse.ts writes rows in
  * N5..N1 order. */
 export function buildJlptIndex(rows: JlptCsvRow[]): JlptIndex {
   const exact = new Map<string, VocabularyItem['jlptLevel']>();

@@ -1,10 +1,11 @@
 import { z } from 'zod';
-import { AXES, JLPT_LEVELS, PARTS_OF_SPEECH, RELATIONS } from './constants.js';
+import { AXES, JLPT_FILTER_KEYS, JLPT_LEVELS, PARTS_OF_SPEECH, RELATIONS } from './constants.js';
 import { isEntryId } from './entryId.js';
 
 export const axisSchema = z.enum(AXES);
 export const relationSchema = z.enum(RELATIONS);
 export const jlptLevelSchema = z.enum(JLPT_LEVELS);
+export const jlptFilterKeySchema = z.enum(JLPT_FILTER_KEYS);
 export const partOfSpeechSchema = z.enum(PARTS_OF_SPEECH);
 
 export const entryIdSchema = z
@@ -121,6 +122,13 @@ export const linkedEntrySchema = z.object({
   relation: relationSchema,
   weight: z.number().min(0).max(1).nullable(),
   entry: entrySummarySchema,
+  // Labels of the hubs this entry shares with the active entry, for a
+  // family relation: the shared reading on the phonetic axis, the
+  // shared radical or component on the structural axis, the shared
+  // synset lemma or gloss on the semantic axis. Usually one label; more
+  // when the two entries share several hubs of the same kind. Empty for
+  // a pairwise relation.
+  via: z.array(z.string()).default([]),
 });
 export type LinkedEntry = z.infer<typeof linkedEntrySchema>;
 
@@ -153,12 +161,22 @@ export const linksQuerySchema = z
       .pipe(z.array(axisSchema).min(1)),
     limit: z.coerce.number().int().min(1).max(200).default(50),
     // A cursor is scoped to the single axis it was issued for (it
-    // encodes {axis, relation, weight, toEntryId}: see
+    // encodes the axis and a position per relation on it: see
     // apps/api/src/services/cursor.ts). Supplying a cursor together
     // with more than one axis is ambiguous - which axis would it
     // resume? - so it is rejected below rather than silently applied
     // to every requested axis.
     cursor: z.string().optional(),
+    // Comma-separated JLPT_FILTER_KEYS: only links whose target entry
+    // has one of these levels ('none' = no level) are listed, paged,
+    // and counted in `total`. Absent means no filter. Present but empty
+    // is rejected: a filter that matches nothing is the client's to
+    // short-circuit, not a request to make.
+    jlpt: z
+      .string()
+      .optional()
+      .transform((s) => (s === undefined ? undefined : [...new Set(s.split(',').filter(Boolean))]))
+      .pipe(z.array(jlptFilterKeySchema).min(1).optional()),
   })
   .refine((q) => !q.cursor || q.axis.length === 1, {
     message: 'cursor requires exactly one axis to be specified',

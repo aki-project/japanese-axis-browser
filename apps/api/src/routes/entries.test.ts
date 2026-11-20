@@ -279,6 +279,41 @@ beforeAll(async () => {
     { hubId: 'h:gloss:てすと', entryId: 'w:1003', rank: 2 },
   ]);
 
+  // Code-point ordering fixture, isolated from everything above: a
+  // radical hub whose unranked members tie on weight, so their order
+  // comes down to entry ID alone. U+FA43 is a CJK compatibility
+  // ideograph and U+20B9F an Extension B kanji (a surrogate pair):
+  // UTF-16 code-unit order and code point order disagree on them, and
+  // a locale collation such as en_US.utf8 sorts U+FA43 next to U+6691.
+  const codePointKanji = ['旦', '暑', '\uFA43', '\u{20B9F}'];
+  await db.insert(kanji).values(
+    ['昌', ...codePointKanji].map((literal, i) => ({
+      literal,
+      onReadings: [],
+      kunReadings: [],
+      meanings: [`code point fixture ${i}`],
+      strokeCount: 8,
+      radical: null,
+      components: [],
+      etymology: null,
+      jlptLevel: null,
+      frequency: null,
+    })),
+  );
+  await db
+    .insert(hubs)
+    .values([{ hubId: 'h:radical:code-point', kind: 'radical', label: '日', memberCount: 5 }]);
+  await db
+    .insert(hubMembers)
+    .values([
+      { hubId: 'h:radical:code-point', entryId: 'k:昌', rank: 0 },
+      ...codePointKanji.map((literal) => ({
+        hubId: 'h:radical:code-point',
+        entryId: `k:${literal}`,
+        rank: null,
+      })),
+    ]);
+
   app = await buildApp({ db });
 });
 
@@ -337,9 +372,9 @@ describe('GET /api/entries/:entryId', () => {
     expect(body.sentences[0]?.entryIds.sort()).toEqual(['k:語', 'w:1001']);
   });
 
-  it('sets a long-lived Cache-Control header', async () => {
+  it('sets no-cache outside production', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/entries/w:1001' });
-    expect(res.headers['cache-control']).toBe('public, max-age=86400');
+    expect(res.headers['cache-control']).toBe('no-cache');
   });
 
   it('agrees with the /links endpoint total when a hub member points to an unloaded target', async () => {
@@ -405,6 +440,22 @@ describe('GET /api/entries/:entryId/links', () => {
     expect(allEntries.map((e) => e.entry.entryId)).toEqual(['w:1003']);
   });
 
+  it('returns the labels of every shared hub as `via`, and none for a pairwise link', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/entries/k:壱/links?axis=phonetic' });
+    const body = linksResponseSchema.parse(res.json());
+    const onReading = body.axes[0]?.relations.find((r) => r.relation === 'shared_on_reading');
+    // 弐 shares both on hubs with 壱; 参 only the first.
+    expect(onReading?.entries.map((e) => [e.entry.entryId, e.via])).toEqual([
+      ['k:弐', ['ダミー', 'ダミー2']],
+      ['k:参', ['ダミー']],
+    ]);
+
+    const pairwise = await app.inject({ method: 'GET', url: '/api/entries/w:1001/links?axis=structural' });
+    const pairwiseBody = linksResponseSchema.parse(pairwise.json());
+    const pairwiseEntries = pairwiseBody.axes[0]?.relations.flatMap((r) => r.entries) ?? [];
+    expect(pairwiseEntries.every((e) => e.via.length === 0)).toBe(true);
+  });
+
   it('merges a hub-derived sibling with a pairwise link on the same axis, grouped under their own relations', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/entries/w:2001/links?axis=semantic' });
     const body = linksResponseSchema.parse(res.json());
@@ -436,6 +487,93 @@ describe('GET /api/entries/:entryId/links', () => {
     }
     // k:本 (rank 0) and k:語 (rank 1) sort before k:峠 (null rank last).
     expect(seen).toEqual(['k:本', 'k:語', 'k:峠']);
+  });
+
+  it.each([1, 2, 3, 4])(
+    'walks weight-tied hub siblings in code point order at limit=%i, in full pages with no trailing empty page',
+    async (limit) => {
+      const pages: string[][] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 10; i++) {
+        const qs = new URLSearchParams({ axis: 'structural', limit: String(limit) });
+        if (cursor) qs.set('cursor', cursor);
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/entries/${encodeURIComponent('k:昌')}/links?${qs}`,
+        });
+        const body = linksResponseSchema.parse(res.json());
+        const structural = body.axes[0];
+        expect(structural?.total).toBe(4);
+        pages.push(
+          structural?.relations.flatMap((r) => r.entries.map((e) => e.entry.entryId)) ?? [],
+        );
+        if (!structural?.nextCursor) break;
+        cursor = structural.nextCursor;
+      }
+      expect(pages.flat()).toEqual(['k:旦', 'k:暑', 'k:\uFA43', 'k:\u{20B9F}']);
+      // Exactly ceil(total / limit) requests: every page but the last is full.
+      expect(pages).toHaveLength(Math.ceil(4 / limit));
+      for (const page of pages.slice(0, -1)) expect(page).toHaveLength(limit);
+    },
+  );
+
+  it('filters hub siblings by JLPT level, with total counting only matches', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/entries/k:日/links?axis=structural&jlpt=N5,none',
+    });
+    expect(res.statusCode).toBe(200);
+    const structural = linksResponseSchema.parse(res.json()).axes[0];
+    expect(structural?.total).toBe(2);
+    // k:本 is N5 and k:峠 has no level; k:語 (N4) is filtered out.
+    expect(structural?.relations.flatMap((r) => r.entries).map((e) => e.entry.entryId)).toEqual([
+      'k:本',
+      'k:峠',
+    ]);
+    expect(structural?.nextCursor).toBeNull();
+
+    // The entry endpoint's counts are never filtered.
+    const entryRes = await app.inject({ method: 'GET', url: '/api/entries/k:日' });
+    expect(entryResponseSchema.parse(entryRes.json()).linkCounts.structural).toBe(3);
+  });
+
+  it('filters pairwise links by JLPT level', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/entries/w:1001/links?axis=structural&jlpt=N4',
+    });
+    const structural = linksResponseSchema.parse(res.json()).axes[0];
+    expect(structural?.total).toBe(1);
+    expect(structural?.relations.flatMap((r) => r.entries).map((e) => e.entry.entryId)).toEqual([
+      'k:語',
+    ]);
+  });
+
+  it('walks a JLPT-filtered axis in full pages, skipping filtered entries without short pages', async () => {
+    const pages: string[][] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const qs = new URLSearchParams({ axis: 'structural', limit: '1', jlpt: 'N5,N4' });
+      if (cursor) qs.set('cursor', cursor);
+      const res = await app.inject({ method: 'GET', url: `/api/entries/k:日/links?${qs}` });
+      const structural = linksResponseSchema.parse(res.json()).axes[0];
+      expect(structural?.total).toBe(2);
+      pages.push(structural?.relations.flatMap((r) => r.entries.map((e) => e.entry.entryId)) ?? []);
+      if (!structural?.nextCursor) break;
+      cursor = structural.nextCursor;
+    }
+    expect(pages).toEqual([['k:本'], ['k:語']]);
+  });
+
+  it('400s an empty or unknown jlpt filter', async () => {
+    for (const jlpt of ['', 'N6']) {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/entries/k:日/links?axis=structural&jlpt=${jlpt}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('VALIDATION_ERROR');
+    }
   });
 
   it('dedupes a same-kind-hub partner and excludes the entry itself, and axis filtering only queries requested relations', async () => {
@@ -474,9 +612,9 @@ describe('GET /api/entries/:entryId/links', () => {
     expect(seen).toEqual(['k:日', 'k:本', 'k:語']);
   });
 
-  it('sets a long-lived Cache-Control header', async () => {
+  it('sets no-cache outside production', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/entries/w:1001/links' });
-    expect(res.headers['cache-control']).toBe('public, max-age=86400');
+    expect(res.headers['cache-control']).toBe('no-cache');
   });
 
   it('404s on links for an unknown entry', async () => {
@@ -548,9 +686,9 @@ describe('GET /api/entries/search', () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it('sets a long-lived Cache-Control header', async () => {
+  it('sets no-cache outside production', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/entries/search?q=本' });
-    expect(res.headers['cache-control']).toBe('public, max-age=86400');
+    expect(res.headers['cache-control']).toBe('no-cache');
   });
 
   it('400s a whitespace-only query instead of dumping unfiltered results', async () => {
@@ -603,6 +741,34 @@ describe('GET /api/entries/search', () => {
     const kinds = new Set(body.results.map((r) => r.kind));
     expect(kinds.has('kanji')).toBe(true);
     expect(kinds.has('word')).toBe(true);
+  });
+});
+
+describe('Cache-Control in production', () => {
+  let prodApp: FastifyInstance;
+
+  beforeAll(async () => {
+    prodApp = await buildApp({ db: appDb.db, production: true });
+  });
+
+  afterAll(async () => {
+    await prodApp.close();
+  });
+
+  it.each([
+    '/api/entries/w:1001',
+    '/api/entries/w:1001/links',
+    `/api/entries/search?q=${encodeURIComponent('本')}`,
+  ])('sets a long-lived Cache-Control header on %s', async (url) => {
+    const res = await prodApp.inject({ method: 'GET', url });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe('public, max-age=86400');
+  });
+
+  it('sets no Cache-Control header on an error response', async () => {
+    const res = await prodApp.inject({ method: 'GET', url: '/api/entries/k:%E7%84%A1' });
+    expect(res.statusCode).toBe(404);
+    expect(res.headers['cache-control']).toBeUndefined();
   });
 });
 

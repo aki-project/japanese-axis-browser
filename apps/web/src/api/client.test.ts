@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiClientError, getEntry, searchEntries } from './client.js';
+import { ApiClientError, getEntry, getLinks, searchEntries } from './client.js';
 
 function jsonResponse(body: unknown, init?: { status?: number; ok?: boolean }): Response {
   const status = init?.status ?? 200;
@@ -45,6 +45,18 @@ describe('api client', () => {
     if (entry.kind === 'kanji') {
       expect(entry.kanji.literal).toBe('日');
     }
+  });
+
+  it('sends the jlpt filter as a comma-separated parameter, and omits it when unset', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entryId: 'k:日', axes: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getLinks('k:日', { axis: ['structural'], jlpt: ['N5', 'none'] });
+    await getLinks('k:日', { axis: ['structural'] });
+
+    const [filtered, unfiltered] = fetchMock.mock.calls.map(([url]) => new URL(String(url), 'http://x'));
+    expect(filtered?.searchParams.get('jlpt')).toBe('N5,none');
+    expect(unfiltered?.searchParams.has('jlpt')).toBe(false);
   });
 
   it('turns a non-ok response into an ApiClientError carrying the body code', async () => {

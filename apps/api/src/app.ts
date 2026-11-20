@@ -7,6 +7,8 @@ import { registerHealthRoute } from './routes/health.js';
 
 export interface BuildAppOptions {
   db: Db;
+  /** Long-lived Cache-Control in production; no-cache otherwise. Defaults to false. */
+  production?: boolean;
 }
 
 function errorShape(code: string, message: string): { error: { code: string; message: string } } {
@@ -45,7 +47,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   await app.register(
     async (instance) => {
       await registerHealthRoute(instance);
-      await registerEntryRoutes(instance, options.db);
+      await registerEntryRoutes(instance, options.db, { production: options.production ?? false });
     },
     { prefix: '/api' },
   );

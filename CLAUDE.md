@@ -98,11 +98,12 @@ Not built now. When it is added, the only per-user data will be a learned or unl
 - Schemas in `packages/shared` are the single source of truth. Change the schema first, then the server, then the client.
 - REST paths: `/api/entries/:entryId`, `/api/entries/:entryId/links?axis=semantic,phonetic,structural`, `/api/entries/search?q=`. All routes are GET and public.
 - `/api/entries/:entryId` returns the full entry plus a summary count of links per axis so the page can render axis controls before links load.
-- Links are returned grouped by axis, then by relation, ordered by weight descending. Unfiltered link lists are paginated per axis.
+- Links are returned grouped by axis, then by relation, ordered by weight descending. Link lists are paginated per axis, and each page is split evenly between the axis's relations that still have links (`limit / K` each for K such relations; a relation's unused share goes to the others), so every relation appears on the first page. The cursor carries a position per relation.
+- The links endpoint takes an optional `jlpt` filter (comma-separated JLPT levels and `none`). It is applied in SQL before paging and in `total`, so every page but the last is full. The entry endpoint's per-axis counts are never filtered.
 - The response shape does not distinguish pairwise from family relations. The API materializes family siblings from hubs at request time, derives their `weight` from `rank`, and merges them with the pairwise rows before grouping. A relation appears in exactly one of the two shapes, never both.
 - Error shape: `{ error: { code: string, message: string } }`.
 - Lists that can grow are paginated. Cursor-based, default 50.
-- Responses for entries and links are cacheable. Set `Cache-Control` with a long max-age; content changes only when the pipeline reloads.
+- Responses for entries and links are cacheable. In production (`NODE_ENV=production`, set by the api `start` script) send `Cache-Control: public, max-age=86400`, since content changes only when the pipeline reloads. Outside production send `no-cache`, so a data reload shows up immediately.
 
 ### Business logic
 - Link grouping, ranking, and search-key handling live in `apps/api/src/services` as pure functions with no HTTP or database imports, each with unit tests.
@@ -156,4 +157,4 @@ Known gaps and decisions deferred at the end of the first build (2026-09-08). No
 - **Not checked in a real browser.** Layout, ruby rendering, and kana/kanji/Latin baseline alignment are verified only by jsdom tests and a production build.
 - **Version pins.** TypeScript 5.9, Vite 7, Vitest 4, and React Router 7 were pinned deliberately below the newest majors. Upgrade one at a time when wanted.
 - **Sentences.** Tatoeba download, the sentence stage, and the furigana segmenter are stubbed. The tables and frontend section exist and are empty.
-- **Local database.** This machine runs on the embedded PGlite fallback because no Postgres credentials or Docker were available. Only one process may open `data/pglite/` at a time.
+- **Local database.** This machine now runs the Docker Compose Postgres on host port 5433, because the system Postgres holds 5432; `.env` sets `POSTGRES_PORT` and `DATABASE_URL` accordingly. The full dataset is loaded into it. The api `dev`/`db:migrate` and pipeline `load`/`seed`/`check` scripts load `.env` with `--env-file-if-exists`; tests do not. Without `DATABASE_URL` everything falls back to PGlite in `data/pglite/` (one process at a time).

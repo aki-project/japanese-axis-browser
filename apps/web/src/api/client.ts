@@ -5,6 +5,7 @@ import {
   searchResponseSchema,
   type Axis,
   type EntryResponse,
+  type JlptFilterKey,
   type LinksResponse,
   type SearchResponse,
 } from '@japanesesite/shared';
@@ -64,16 +65,19 @@ export interface GetLinksParams {
   axis: readonly Axis[];
   limit?: number;
   cursor?: string;
+  /** Only list links to entries at these JLPT levels ('none' = no level). Omit for no filter. */
+  jlpt?: readonly JlptFilterKey[];
 }
 
 export async function getLinks(
   entryId: string,
-  { axis, limit, cursor }: GetLinksParams,
+  { axis, limit, cursor, jlpt }: GetLinksParams,
 ): Promise<LinksResponse> {
   const params = new URLSearchParams();
   params.set('axis', axis.join(','));
   if (limit !== undefined) params.set('limit', String(limit));
   if (cursor !== undefined) params.set('cursor', cursor);
+  if (jlpt !== undefined) params.set('jlpt', jlpt.join(','));
   const body = await getJson(
     `/api/entries/${encodeURIComponent(entryId)}/links?${params.toString()}`,
   );

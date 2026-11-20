@@ -10,7 +10,7 @@
  * here does not declare an FK, but referential integrity still matters
  * for the API).
  *
- * Usage: tsx src/stages/load.ts [--dir=processed|seed]
+ * Usage: tsx src/stages/6_load.ts [--dir=processed|seed]
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

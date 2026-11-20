@@ -26,8 +26,8 @@ describe('flattenAxisPages', () => {
           {
             relation: 'synonym' as const,
             entries: [
-              { relation: 'synonym' as const, weight: 1, entry: entry('k:a', 'a') },
-              { relation: 'synonym' as const, weight: 1, entry: entry('k:b', 'b') },
+              { relation: 'synonym' as const, weight: 1, entry: entry('k:a', 'a'), via: [] },
+              { relation: 'synonym' as const, weight: 1, entry: entry('k:b', 'b'), via: [] },
             ],
           },
         ],
@@ -40,8 +40,8 @@ describe('flattenAxisPages', () => {
             relation: 'synonym' as const,
             entries: [
               // Same (relation, entryId) as page 1 — must not duplicate.
-              { relation: 'synonym' as const, weight: 1, entry: entry('k:a', 'a') },
-              { relation: 'synonym' as const, weight: 1, entry: entry('k:c', 'c') },
+              { relation: 'synonym' as const, weight: 1, entry: entry('k:a', 'a'), via: [] },
+              { relation: 'synonym' as const, weight: 1, entry: entry('k:c', 'c'), via: [] },
             ],
           },
         ],
@@ -86,7 +86,7 @@ describe('useAxisLinks', () => {
           relations: [
             {
               relation: 'synonym',
-              entries: [{ relation: 'synonym', weight: 1, entry: entry('k:a', 'a') }],
+              entries: [{ relation: 'synonym', weight: 1, entry: entry('k:a', 'a'), via: [] }],
             },
           ],
           nextCursor: 'cursor-2',
@@ -104,8 +104,8 @@ describe('useAxisLinks', () => {
               relation: 'synonym',
               entries: [
                 // Repeats the entry from page 1: must be deduped, not doubled.
-                { relation: 'synonym', weight: 1, entry: entry('k:a', 'a') },
-                { relation: 'synonym', weight: 1, entry: entry('k:b', 'b') },
+                { relation: 'synonym', weight: 1, entry: entry('k:a', 'a'), via: [] },
+                { relation: 'synonym', weight: 1, entry: entry('k:b', 'b'), via: [] },
               ],
             },
           ],

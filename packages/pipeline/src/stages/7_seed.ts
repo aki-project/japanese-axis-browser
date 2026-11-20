@@ -1,6 +1,6 @@
 /**
  * Stage 7: seed. Builds a small, connected subset of the full processed
- * data into data/seed/, then loads it (see load.ts --dir=seed).
+ * data into data/seed/, then loads it (see 6_load.ts --dir=seed).
  *
  * Construction:
  *  1. Start from the kanji in "日本人学生語" and every word containing
@@ -270,7 +270,7 @@ async function main(): Promise<void> {
   await writeAll(SEED.hubs, subsetHubs.hubs);
   await writeAll(SEED.hubMembers, subsetHubs.members);
 
-  console.log('\nseed stage complete. Run `pnpm --filter pipeline exec tsx src/stages/load.ts --dir=seed` to load it.');
+  console.log('\nseed stage complete. Run `pnpm --filter pipeline exec tsx src/stages/6_load.ts --dir=seed` to load it.');
 }
 
 async function writeAll(path: string, records: unknown[]): Promise<void> {

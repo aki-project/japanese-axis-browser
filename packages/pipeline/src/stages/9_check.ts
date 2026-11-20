@@ -7,7 +7,7 @@
  * and ten random entries with their per-axis pairwise link counts.
  * Read-only, computed against the live DB, not the processed files.
  *
- * Usage: tsx src/stages/check.ts
+ * Usage: tsx src/stages/9_check.ts
  */
 import { createDb } from 'api/db/client';
 import { kanji, vocabularyItems, radicals, components, links, hubs, hubMembers } from 'api/db/schema';

@@ -92,6 +92,21 @@ describe('schemas', () => {
     expect(r.success).toBe(false);
   });
 
+  it('leaves jlpt undefined when absent', () => {
+    expect(linksQuerySchema.parse({}).jlpt).toBeUndefined();
+  });
+
+  it('parses a comma-separated jlpt filter, dropping duplicates', () => {
+    const q = linksQuerySchema.parse({ jlpt: 'N5,none,N5' });
+    expect(q.jlpt).toEqual(['N5', 'none']);
+  });
+
+  it('rejects an empty or unknown jlpt filter', () => {
+    expect(linksQuerySchema.safeParse({ jlpt: '' }).success).toBe(false);
+    expect(linksQuerySchema.safeParse({ jlpt: 'N6' }).success).toBe(false);
+    expect(linksQuerySchema.safeParse({ jlpt: 'n5' }).success).toBe(false);
+  });
+
   it('rejects a whitespace-only search query', () => {
     const r = searchQuerySchema.safeParse({ q: '   ' });
     expect(r.success).toBe(false);

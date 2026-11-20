@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   const appDb = await createDb();
   await runMigrations(appDb, migrationsFolder);
 
-  const app = await buildApp({ db: appDb.db });
+  const app = await buildApp({ db: appDb.db, production: process.env.NODE_ENV === 'production' });
 
   const port = Number(process.env.API_PORT ?? 3001);
   await app.listen({ port, host: '0.0.0.0' });

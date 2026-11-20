@@ -1,7 +1,7 @@
 /**
  * Stage 3: transform. Reads data/processed/raw-*.jsonl and builds
  * data/processed/{kanji,words,radicals,components}.jsonl matching the
- * shared zod schemas. Sentences are deferred (see stages/sentences.ts).
+ * shared zod schemas. Sentences are deferred (see stages/8_sentences.ts).
  */
 import { PARSED, PROCESSED } from '../lib/paths.js';
 import { JsonlWriter } from '../lib/jsonl.js';

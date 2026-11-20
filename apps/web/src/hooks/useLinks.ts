@@ -1,9 +1,9 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
-import type { Axis, LinkedEntry, Relation, RelationGroup } from '@japanesesite/shared';
+import type { Axis, JlptFilterKey, LinkedEntry, Relation, RelationGroup } from '@japanesesite/shared';
 import { getLinks } from '../api/client.js';
 
-export function axisLinksQueryKey(entryId: string, axis: Axis) {
-  return ['links', entryId, axis] as const;
+export function axisLinksQueryKey(entryId: string, axis: Axis, jlpt?: readonly JlptFilterKey[]) {
+  return ['links', entryId, axis, jlpt ? jlpt.join(',') : 'all'] as const;
 }
 
 interface AxisPage {
@@ -12,8 +12,17 @@ interface AxisPage {
   nextCursor: string | null;
 }
 
-async function fetchAxisPage(entryId: string, axis: Axis, cursor: string | undefined): Promise<AxisPage> {
-  const response = await getLinks(entryId, cursor === undefined ? { axis: [axis] } : { axis: [axis], cursor });
+async function fetchAxisPage(
+  entryId: string,
+  axis: Axis,
+  cursor: string | undefined,
+  jlpt: readonly JlptFilterKey[] | undefined,
+): Promise<AxisPage> {
+  const response = await getLinks(entryId, {
+    axis: [axis],
+    ...(cursor !== undefined && { cursor }),
+    ...(jlpt !== undefined && { jlpt }),
+  });
   const group = response.axes.find((g) => g.axis === axis);
   if (!group) {
     return { total: 0, relations: [], nextCursor: null };
@@ -81,14 +90,23 @@ export interface AxisLinksResult {
  * page both request only this axis, satisfying the API rule that a
  * cursor names exactly one axis. Pending/error/pagination state is
  * therefore naturally scoped per axis instead of shared across a panel.
+ *
+ * `jlpt` is passed to the API, which filters before paging, so every
+ * page but the last is full. Undefined means no filter. An empty list
+ * matches nothing, so nothing is fetched.
  */
-export function useAxisLinks(entryId: string, axis: Axis, enabled: boolean): AxisLinksResult {
+export function useAxisLinks(
+  entryId: string,
+  axis: Axis,
+  enabled: boolean,
+  jlpt?: readonly JlptFilterKey[],
+): AxisLinksResult {
   const query = useInfiniteQuery({
-    queryKey: axisLinksQueryKey(entryId, axis),
-    queryFn: ({ pageParam }: { pageParam: string | undefined }) => fetchAxisPage(entryId, axis, pageParam),
+    queryKey: axisLinksQueryKey(entryId, axis, jlpt),
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) => fetchAxisPage(entryId, axis, pageParam, jlpt),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage: AxisPage) => lastPage.nextCursor ?? undefined,
-    enabled,
+    enabled: enabled && jlpt?.length !== 0,
   });
 
   return {

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, min, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, min, ne, or, sql, type SQL } from 'drizzle-orm';
 import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import {
   HIRAGANA_CHARS,
@@ -6,10 +6,19 @@ import {
   KATAKANA_CHARS,
   parseEntryId,
 } from '@japanesesite/shared';
-import type { Axis, EntryId, EntrySummary, HubKind, Relation, Sentence } from '@japanesesite/shared';
+import type {
+  Axis,
+  EntryId,
+  EntrySummary,
+  HubKind,
+  JlptFilterKey,
+  JlptLevel,
+  Relation,
+  Sentence,
+} from '@japanesesite/shared';
 import { kanjiRowToSummary, wordRowToSummary, type KanjiRow } from '../services/entrySummary.js';
 import type { FlatLinkRow } from '../services/groupLinks.js';
-import type { LinkCursor } from '../services/cursor.js';
+import type { RelationPosition } from '../services/cursor.js';
 import { hubWeightBaseFor } from '../services/hubWeights.js';
 import { mergeSearchResults, type TieredEntry } from '../services/searchRanking.js';
 import type { Db } from './client.js';
@@ -27,11 +36,35 @@ const AXIS_BY_FAMILY_RELATION = new Map<Relation, Axis>(
   Object.values(HUB_KIND_RELATION).map((v) => [v.relation, v.axis]),
 );
 
-/** `EXISTS` check that `entryIdExpr` (an entry-ID text expression) names a loaded entry. */
-function entryExistsSql(entryIdExpr: AnyPgColumn) {
+/** `jlptCol` holds one of the filter's levels, or is null when the filter includes 'none'. */
+function jlptMatchSql(jlptCol: AnyPgColumn, jlpt: readonly JlptFilterKey[]): SQL {
+  const levels = jlpt.filter((k): k is JlptLevel => k !== 'none');
+  const parts: SQL[] = [];
+  if (levels.length > 0) parts.push(inArray(jlptCol, levels));
+  if (jlpt.includes('none')) parts.push(isNull(jlptCol));
+  return or(...parts) ?? sql`false`;
+}
+
+/**
+ * `EXISTS` check that `entryIdExpr` (an entry-ID text expression) names a
+ * loaded entry and, when `jlpt` is given, one whose JLPT level passes the
+ * filter. Every links query and count goes through this one predicate, so
+ * filtered pages and filtered totals always agree.
+ *
+ * The ID is split and compared against each table's primary key, never
+ * rebuilt from the key ('k:' || literal), so each check is one index
+ * lookup instead of a scan of the whole table per candidate row. The
+ * word branch only casts IDs that are `w:` plus at most 9 digits, so a
+ * malformed ID matches nothing rather than raising a cast error, and
+ * then re-checks the exact text so a non-canonical ID such as `w:0123`
+ * matches nothing either (getEntrySummaries could not find it).
+ */
+function entryExistsSql(entryIdExpr: AnyPgColumn, jlpt?: readonly JlptFilterKey[]) {
+  const kanjiLevel = jlpt ? sql` AND ${jlptMatchSql(kanji.jlptLevel, jlpt)}` : sql``;
+  const wordLevel = jlpt ? sql` AND ${jlptMatchSql(vocabularyItems.jlptLevel, jlpt)}` : sql``;
   return sql`(
-    EXISTS (SELECT 1 FROM ${kanji} WHERE 'k:' || ${kanji.literal} = ${entryIdExpr})
-    OR EXISTS (SELECT 1 FROM ${vocabularyItems} WHERE 'w:' || ${vocabularyItems.entSeq}::text = ${entryIdExpr})
+    EXISTS (SELECT 1 FROM ${kanji} WHERE starts_with(${entryIdExpr}, 'k:') AND ${kanji.literal} = substr(${entryIdExpr}, 3)${kanjiLevel})
+    OR EXISTS (SELECT 1 FROM ${vocabularyItems} WHERE ${vocabularyItems.entSeq} = (CASE WHEN ${entryIdExpr} ~ '^w:[0-9]{1,9}$' THEN substr(${entryIdExpr}, 3)::int END) AND ${vocabularyItems.entSeq}::text = substr(${entryIdExpr}, 3)${wordLevel})
   )`;
 }
 
@@ -74,7 +107,11 @@ export interface LinkCounts {
  * row. One query covers every hub kind at once (grouped by kind), since
  * GET /entries/:id wants all axes regardless of any axis filter.
  */
-async function getFamilySiblingCounts(db: Db, entryId: string): Promise<Partial<Record<Relation, number>>> {
+async function getFamilySiblingCounts(
+  db: Db,
+  entryId: string,
+  jlpt?: readonly JlptFilterKey[],
+): Promise<Partial<Record<Relation, number>>> {
   const hm1 = alias(hubMembers, 'hm1');
   const hm2 = alias(hubMembers, 'hm2');
 
@@ -83,7 +120,9 @@ async function getFamilySiblingCounts(db: Db, entryId: string): Promise<Partial<
     .from(hm1)
     .innerJoin(hubs, eq(hubs.hubId, hm1.hubId))
     .innerJoin(hm2, eq(hm2.hubId, hm1.hubId))
-    .where(and(eq(hm1.entryId, entryId), ne(hm2.entryId, entryId), entryExistsSql(hm2.entryId)))
+    .where(
+      and(eq(hm1.entryId, entryId), ne(hm2.entryId, entryId), entryExistsSql(hm2.entryId, jlpt)),
+    )
     .groupBy(hubs.kind, hm2.entryId)
     .as('per_partner');
 
@@ -108,14 +147,18 @@ async function getFamilySiblingCounts(db: Db, entryId: string): Promise<Partial<
  * this same function - since groupLinks() also drops rows whose target
  * has no loaded summary and dedupes same-kind-hub overlap the same way.
  */
-export async function getLinkCounts(db: Db, entryId: string): Promise<LinkCounts> {
+export async function getLinkCounts(
+  db: Db,
+  entryId: string,
+  jlpt?: readonly JlptFilterKey[],
+): Promise<LinkCounts> {
   const [pairwiseRows, familyCounts] = await Promise.all([
     db
       .select({ axis: links.axis, count: sql<number>`count(*)::int` })
       .from(links)
-      .where(and(eq(links.fromEntryId, entryId), entryExistsSql(links.toEntryId)))
+      .where(and(eq(links.fromEntryId, entryId), entryExistsSql(links.toEntryId, jlpt)))
       .groupBy(links.axis),
-    getFamilySiblingCounts(db, entryId),
+    getFamilySiblingCounts(db, entryId, jlpt),
   ]);
 
   const counts: LinkCounts = { semantic: 0, phonetic: 0, structural: 0 };
@@ -132,32 +175,27 @@ export async function getLinkCounts(db: Db, entryId: string): Promise<LinkCounts
 }
 
 /**
- * `row after cursor` predicate for a single relation's hub-sibling
+ * `row after position` predicate for a single relation's hub-sibling
  * query, expressed in terms of that relation's SQL-computed `weight`
- * (see getHubSiblingRows) so it composes correctly with pairwise rows
- * and with other relations under the same weight-desc/toEntryId-asc/
- * relation-asc total order used everywhere links are listed (see
- * services/cursor.ts). Since `relation` is fixed for the whole query,
- * the three-level comparator collapses to: strictly lower weight, or
- * equal weight with a strictly greater entryId, or (only when this
- * relation sorts after the cursor's relation) an exact tie on both.
+ * (see getHubSiblingRows) and the in-relation order used everywhere
+ * links are listed (weight desc, then toEntryId asc; see
+ * services/cursor.ts): strictly lower weight, or equal weight with a
+ * strictly greater entryId.
  */
-function afterCursorSql(
+function afterPositionSql(
   weightExpr: ReturnType<typeof sql<number>>,
   entryIdCol: AnyPgColumn,
-  relation: Relation,
-  cursor: LinkCursor,
+  position: RelationPosition,
 ) {
-  if (cursor.weight === null) {
+  if (position.weight === null) {
     // Every hub-derived row has a non-null computed weight, and null
     // sorts last of all, so nothing here can come after a null-weight
-    // cursor: it would already be the very end of the axis.
+    // position.
     return sql`false`;
   }
-  const relationAfter = relation > cursor.relation;
-  return relationAfter
-    ? sql`(${weightExpr} < ${cursor.weight} OR (${weightExpr} = ${cursor.weight} AND ${entryIdCol} >= ${cursor.toEntryId}))`
-    : sql`(${weightExpr} < ${cursor.weight} OR (${weightExpr} = ${cursor.weight} AND ${entryIdCol} > ${cursor.toEntryId}))`;
+  // COLLATE "C" (code point order) so the comparison matches groupLinks'
+  // JS ordering whatever the database's default collation is.
+  return sql`(${weightExpr} < ${position.weight} OR (${weightExpr} = ${position.weight} AND ${entryIdCol} COLLATE "C" > ${position.toEntryId}))`;
 }
 
 /**
@@ -167,13 +205,16 @@ function afterCursorSql(
  * hubs of that kind counts once (keeping the lowest rank), excluding
  * `entryId` itself and any member with no loaded entry row.
  *
- * Ordered by rank ascending (nulls last), then entry_id ascending -
- * matching the hub_members(hub_id, rank, entry_id) index - via a
+ * Ordered by rank ascending (nulls last), then entry_id ascending by
+ * code point (COLLATE "C", matching groupLinks' compareCodePoints, so a
+ * database created with a locale collation such as en_US.utf8 cannot
+ * reorder ties and make the cursor skip rows) - via a
  * `weight` computed with the same formula as
  * rankToWeight(HUB_WEIGHT_BASE[relation], rank)
  * (packages/shared/src/hubs.ts), so it merges correctly with pairwise
  * rows and with other relations under a single weight-based order.
- * Both LIMIT and the cursor predicate are pushed into this query: a hub
+ * `after` is this relation's position from the cursor (null for its
+ * first page). Both LIMIT and that predicate are pushed into this query: a hub
  * can have 500+ members, so this never fetches them all to slice in
  * memory.
  */
@@ -181,8 +222,9 @@ export async function getHubSiblingRows(
   db: Db,
   entryId: string,
   relation: Relation,
-  cursor: LinkCursor | null,
+  after: RelationPosition | null,
   limit: number,
+  jlpt?: readonly JlptFilterKey[],
 ): Promise<FlatLinkRow[]> {
   const kind = HUB_KIND_BY_RELATION.get(relation);
   const base = hubWeightBaseFor(relation);
@@ -196,6 +238,11 @@ export async function getHubSiblingRows(
     .select({
       partnerId: hm2.entryId,
       minRank: min(hm2.rank).as('min_rank'),
+      // Every shared hub's label, in code point order so the response
+      // is deterministic.
+      labels: sql<string[]>`array_agg(DISTINCT ${hubs.label} COLLATE "C" ORDER BY ${hubs.label} COLLATE "C")`.as(
+        'labels',
+      ),
     })
     .from(hm1)
     .innerJoin(hubs, eq(hubs.hubId, hm1.hubId))
@@ -209,17 +256,23 @@ export async function getHubSiblingRows(
   // rather than needing a separate branch.
   const weightExpr = sql<number>`LEAST(1, GREATEST(0, ${base}::float8 * (1 - 0.6 * (LEAST(GREATEST(COALESCE(${grouped.minRank}, 2500), 0), 2500)::float8 / 2500))))`;
 
-  const conditions = [entryExistsSql(grouped.partnerId)];
-  if (cursor) conditions.push(afterCursorSql(weightExpr, grouped.partnerId, relation, cursor));
+  const conditions = [entryExistsSql(grouped.partnerId, jlpt)];
+  if (after) conditions.push(afterPositionSql(weightExpr, grouped.partnerId, after));
 
   const rows = await db
-    .select({ partnerId: grouped.partnerId, weight: weightExpr })
+    .select({ partnerId: grouped.partnerId, weight: weightExpr, labels: grouped.labels })
     .from(grouped)
     .where(and(...conditions))
-    .orderBy(desc(weightExpr), asc(grouped.partnerId))
+    .orderBy(desc(weightExpr), sql`${grouped.partnerId} COLLATE "C" ASC`)
     .limit(limit);
 
-  return rows.map((r) => ({ axis, relation, toEntryId: r.partnerId, weight: r.weight }));
+  return rows.map((r) => ({
+    axis,
+    relation,
+    toEntryId: r.partnerId,
+    weight: r.weight,
+    via: r.labels,
+  }));
 }
 
 /** Sentences that reference this entry, each with its full set of tagged entry IDs. */
@@ -261,11 +314,16 @@ export async function getSentencesForEntry(db: Db, entryId: string): Promise<Sen
   }));
 }
 
-/** Flat, unpaginated link rows for an entry, restricted to the given axes. */
+/**
+ * Flat, unpaginated link rows for an entry, restricted to the given axes
+ * and to targets that exist (and pass `jlpt`, when given) - the same
+ * predicate getLinkCounts uses.
+ */
 export async function getLinkRowsForAxes(
   db: Db,
   entryId: string,
   axes: Axis[],
+  jlpt?: readonly JlptFilterKey[],
 ): Promise<FlatLinkRow[]> {
   const rows = await db
     .select({
@@ -275,7 +333,13 @@ export async function getLinkRowsForAxes(
       weight: links.weight,
     })
     .from(links)
-    .where(and(eq(links.fromEntryId, entryId), inArray(links.axis, axes)));
+    .where(
+      and(
+        eq(links.fromEntryId, entryId),
+        inArray(links.axis, axes),
+        entryExistsSql(links.toEntryId, jlpt),
+      ),
+    );
 
   // axis/relation are free-text columns backed by pipeline-validated data;
   // the shared enums are the source of truth for allowed values.

@@ -1,36 +1,58 @@
 import { describe, expect, it } from 'vitest';
-import { decodeCursor, encodeCursor } from './cursor.js';
+import { decodeCursor, encodeCursor, type LinkCursor } from './cursor.js';
+
+const encodeRaw = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 describe('cursor', () => {
-  it('round-trips a cursor with a numeric weight', () => {
-    const cursor = { axis: 'semantic' as const, relation: 'synonym' as const, weight: 0.75, toEntryId: 'w:1234' };
-    const encoded = encodeCursor(cursor);
-    expect(decodeCursor(encoded)).toEqual(cursor);
+  it('round-trips per-relation positions, including a null weight', () => {
+    const cursor: LinkCursor = {
+      axis: 'structural',
+      after: {
+        shared_radical: { weight: 0.75, toEntryId: 'k:語' },
+        contains_kanji: { weight: null, toEntryId: 'k:日' },
+      },
+    };
+    expect(decodeCursor(encodeCursor(cursor))).toEqual(cursor);
   });
 
-  it('round-trips a cursor with a null weight', () => {
-    const cursor = { axis: 'structural' as const, relation: 'contains_kanji' as const, weight: null, toEntryId: 'k:日' };
-    const encoded = encodeCursor(cursor);
-    expect(decodeCursor(encoded)).toEqual(cursor);
+  it('round-trips a cursor with no positions', () => {
+    const cursor: LinkCursor = { axis: 'semantic', after: {} };
+    expect(decodeCursor(encodeCursor(cursor))).toEqual(cursor);
   });
 
   it('returns null for garbage input', () => {
     expect(decodeCursor('not-a-valid-cursor!!')).toBeNull();
-    expect(decodeCursor(Buffer.from('{"weight": "x"}').toString('base64url'))).toBeNull();
-    expect(decodeCursor(Buffer.from('null').toString('base64url'))).toBeNull();
+    expect(
+      decodeCursor(
+        encodeRaw({ axis: 'semantic', after: { synonym: { weight: 'x', toEntryId: 'w:1' } } }),
+      ),
+    ).toBeNull();
+    expect(decodeCursor(encodeRaw(null))).toBeNull();
+    expect(decodeCursor(encodeRaw({ axis: 'semantic' }))).toBeNull();
   });
 
   it('returns null when the axis is not a known axis', () => {
-    const encoded = Buffer.from(
-      JSON.stringify({ axis: 'nonsense', relation: 'synonym', weight: 1, toEntryId: 'w:1' }),
-    ).toString('base64url');
-    expect(decodeCursor(encoded)).toBeNull();
+    expect(decodeCursor(encodeRaw({ axis: 'nonsense', after: {} }))).toBeNull();
   });
 
-  it('returns null when the relation is not a known relation', () => {
-    const encoded = Buffer.from(
-      JSON.stringify({ axis: 'semantic', relation: 'nonsense', weight: 1, toEntryId: 'w:1' }),
-    ).toString('base64url');
-    expect(decodeCursor(encoded)).toBeNull();
+  it("returns null for a relation that is not on the cursor's axis", () => {
+    expect(
+      decodeCursor(
+        encodeRaw({ axis: 'semantic', after: { homophone: { weight: 1, toEntryId: 'w:1' } } }),
+      ),
+    ).toBeNull();
+    expect(
+      decodeCursor(
+        encodeRaw({ axis: 'semantic', after: { nonsense: { weight: 1, toEntryId: 'w:1' } } }),
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null for the old single-position cursor shape', () => {
+    expect(
+      decodeCursor(
+        encodeRaw({ axis: 'semantic', relation: 'synonym', weight: 1, toEntryId: 'w:1' }),
+      ),
+    ).toBeNull();
   });
 });

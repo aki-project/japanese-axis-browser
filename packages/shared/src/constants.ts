@@ -26,6 +26,11 @@ export const RELATIONS = Object.values(RELATIONS_BY_AXIS).flat() as unknown as r
 export const JLPT_LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'] as const;
 export type JlptLevel = (typeof JLPT_LEVELS)[number];
 
+// The JLPT levels plus 'none' for entries with no level, as used by the
+// links endpoint's `jlpt` filter.
+export const JLPT_FILTER_KEYS = [...JLPT_LEVELS, 'none'] as const;
+export type JlptFilterKey = (typeof JLPT_FILTER_KEYS)[number];
+
 export const PARTS_OF_SPEECH = [
   'noun',
   'verb',

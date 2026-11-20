@@ -63,7 +63,7 @@ what attribution the licence requires.
 ## Sentences (Tatoeba) — deferred
 
 The Sentence entity and Tatoeba import are explicitly out of scope for
-this build (`src/stages/sentences.ts` is a stub that logs "skipped" and
+this build (`src/stages/8_sentences.ts` is a stub that logs "skipped" and
 exits 0). No Tatoeba data was downloaded. `sentences` and
 `sentence_entries` remain empty tables.
 
