@@ -3,10 +3,14 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: japanesesite
-      POSTGRES_PASSWORD: japanesesite
+      # Read from .env when set. Postgres applies it only when the data
+      # volume is first created.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-japanesesite}
       POSTGRES_DB: japanesesite
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      # Loopback only: published on all interfaces, Docker's own firewall
+      # rules would expose the database to the network.
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
 volumes:
