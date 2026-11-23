@@ -4,8 +4,7 @@
  * is enough since fields are simple (quotes only wrap the meaning
  * column and never contain escaped quotes in this dataset).
  */
-import { createReadStream } from 'node:fs';
-import readline from 'node:readline';
+import { readLines } from '../lib/lines.js';
 
 export interface JlptCsvRow {
   level: 'N5' | 'N4' | 'N3' | 'N2' | 'N1';
@@ -44,10 +43,8 @@ export async function* parseJlptCsv(
   filePath: string,
   level: JlptCsvRow['level'],
 ): AsyncGenerator<JlptCsvRow> {
-  const stream = createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let first = true;
-  for await (const line of rl) {
+  for await (const line of readLines(filePath)) {
     if (first) {
       first = false;
       continue; // header

@@ -1,7 +1,7 @@
-import { createReadStream, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline';
+import { readLines } from './lines.js';
 
 /** Ensures the parent directory of `filePath` exists. */
 export function ensureDirFor(filePath: string): void {
@@ -13,9 +13,7 @@ export function ensureDirFor(filePath: string): void {
  * line. Always opened with explicit UTF-8 decoding.
  */
 export async function* readJsonl<T = unknown>(filePath: string): AsyncGenerator<T> {
-  const stream = createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  for await (const line of rl) {
+  for await (const line of readLines(filePath)) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
     yield JSON.parse(trimmed) as T;

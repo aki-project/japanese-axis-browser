@@ -5,8 +5,7 @@
  * sequence as written and let the transform stage pick the primary one.
  * Comment lines start with '#'.
  */
-import { createReadStream } from 'node:fs';
-import readline from 'node:readline';
+import { readLines } from '../lib/lines.js';
 
 export interface IdsEntry {
   codepoint: string;
@@ -15,9 +14,7 @@ export interface IdsEntry {
 }
 
 export async function* parseIds(filePath: string): AsyncGenerator<IdsEntry> {
-  const stream = createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  for await (const line of rl) {
+  for await (const line of readLines(filePath)) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
     const fields = trimmed.split('\t');
