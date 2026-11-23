@@ -338,8 +338,9 @@ packages/pipeline/src/
 ```
 
 Scripts in `packages/pipeline/package.json`: `download`, `parse`, `transform`,
-`link`, `validate`, `load`, `seed:build`, `seed` (build + validate + load the
-seed), `sentences`, `check`, and `all`.
+`link`, `validate`, `load`, `seed:build` (rebuild and validate `data/seed/` from
+`data/processed/`), `seed` (validate and load the committed `data/seed/`; works on
+a fresh clone), `sentences`, `check`, and `all`.
 
 ---
 
@@ -372,6 +373,7 @@ pnpm dev                          # api :3001 and web :5173
 pnpm test | pnpm typecheck | pnpm lint
 pnpm --filter api db:generate     # new migration from a schema.ts change
 pnpm --filter api db:migrate
-pnpm --filter pipeline seed       # build, validate and load data/seed
+pnpm --filter pipeline seed       # validate and load the committed data/seed
+pnpm --filter pipeline seed:build # rebuild data/seed from data/processed
 pnpm --filter pipeline all        # full pipeline from the raw sources
 ```
